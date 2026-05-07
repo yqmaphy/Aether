@@ -292,6 +292,29 @@ export namespace SplitMigration {
       .run(extra.hash, extra.millis, extra.name, new Date().toISOString())
   }
 
+  function seedMissingMigrationRecords(sqlite: BunDatabase) {
+    const migrationDir = path.join(import.meta.dirname, "../../migration")
+    if (!existsSync(migrationDir)) return
+    const dirs = readdirSync(migrationDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+    const existing = new Set(
+      (sqlite.prepare("SELECT name FROM __drizzle_migrations").all() as { name: string }[]).map((r) => r.name),
+    )
+    for (const dirName of dirs) {
+      if (existing.has(dirName)) continue
+      const sqlFile = path.join(migrationDir, dirName, "migration.sql")
+      if (!existsSync(sqlFile)) continue
+      const sql = readFileSync(sqlFile, "utf-8")
+      const hash = createHash("sha256").update(sql).digest("hex")
+      const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(dirName)
+      const millis = match ? Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]) : 0
+      sqlite
+        .prepare("INSERT OR IGNORE INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)")
+        .run(hash, millis, dirName, new Date().toISOString())
+    }
+  }
+
   const stripProjectRecentFK = `
     CREATE TABLE __new_project_recent (
       key text PRIMARY KEY,
@@ -691,7 +714,8 @@ export namespace SplitMigration {
     destSqlite.exec(stripProjectRecentFK)
     destSqlite.exec(stripSessionPreferenceFK)
     destSqlite.exec("COMMIT")
-    appendMigrationRecord(destSqlite, migrationMeta!)
+    seedMigrationRecords(destSqlite, srcSqlite, migrationMeta!)
+    seedMissingMigrationRecords(destSqlite)
     destSqlite.close()
 
     srcSqlite.close()
