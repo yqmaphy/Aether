@@ -9,7 +9,7 @@ import { Log } from "../util/log"
 import { NamedError } from "@opencode-ai/util/error"
 import z from "zod"
 import path from "path"
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "fs"
 import { Installation } from "../installation"
 import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
@@ -58,6 +58,39 @@ export namespace Database {
     const dir = channelDir()
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     return dir
+  }
+
+  export function reorganizeFlatDbs() {
+    const ch = channel()
+    const dir = channelDir()
+    const flatPattern = new RegExp(`^aether-${ch}-(cron|[0-9a-f]+)\\.db$`, "i")
+    const companionPattern = new RegExp(`^aether-${ch}-(cron|[0-9a-f]+)\\.db-(shm|wal)$`, "i")
+    try {
+      const entries = readdirSync(Global.Path.data, { withFileTypes: true }).filter(
+        (entry) => entry.isFile() && (flatPattern.test(entry.name) || companionPattern.test(entry.name)),
+      )
+      if (entries.length === 0) return
+      mkdirSync(dir, { recursive: true })
+      for (const entry of entries) {
+        const flat = flatPattern.exec(entry.name)
+        const comp = companionPattern.exec(entry.name)
+        const id = flat?.[1] ?? comp?.[1]
+        if (!id) continue
+        const companion = comp?.[2] // "shm" or "wal" or undefined
+        const targetName = companion ? `aether-${id}.db-${companion}` : `aether-${id}.db`
+        const src = path.join(Global.Path.data, entry.name)
+        const dst = path.join(dir, targetName)
+        if (!existsSync(dst)) {
+          log.info("moving flat db file to channel subdir", { from: src, to: dst })
+          renameSync(src, dst)
+        } else {
+          log.warn("target already exists in channel subdir, removing flat file", { flat: src, target: dst })
+          rmSync(src, { force: true })
+        }
+      }
+    } catch (error) {
+      log.warn("failed to reorganize flat db files", { error })
+    }
   }
 
   export function cronPath() {
