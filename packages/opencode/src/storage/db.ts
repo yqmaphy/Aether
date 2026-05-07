@@ -37,12 +37,37 @@ export namespace Database {
     client: ReturnType<typeof Client>["$client"]
   }
 
+  function channel() {
+    const ch = Installation.CHANNEL
+    if (["latest", "beta"].includes(ch) || Flag.OPENCODE_DISABLE_CHANNEL_DB) return "latest"
+    return ch.replace(/[^a-zA-Z0-9._-]/g, "-")
+  }
+
   export function getChannelPath() {
-    const channel = Installation.CHANNEL
-    if (["latest", "beta"].includes(channel) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
+    if (["latest", "beta"].includes(Installation.CHANNEL) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
       return path.join(Global.Path.data, "aether.db")
-    const safe = channel.replace(/[^a-zA-Z0-9._-]/g, "-")
-    return path.join(Global.Path.data, `aether-${safe}.db`)
+    return path.join(Global.Path.data, `aether-${channel()}.db`)
+  }
+
+  export function cronPath() {
+    return path.join(Global.Path.data, `aether-${channel()}-cron.db`)
+  }
+
+  export function projectPath(projectId: string) {
+    return path.join(Global.Path.data, `aether-${channel()}-${projectId}.db`)
+  }
+
+  export function projectPaths(): string[] {
+    const ch = channel()
+    const pattern = new RegExp(`^aether-${ch}-.+\\.db$`)
+    try {
+      return readdirSync(Global.Path.data, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && pattern.test(entry.name))
+        .map((entry) => path.join(Global.Path.data, entry.name))
+        .sort()
+    } catch {
+      return []
+    }
   }
 
   export const Path = iife(() => {
@@ -164,7 +189,8 @@ export namespace Database {
         mkdirSync(lock)
         break
       } catch (error) {
-        const code = error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined
+        const code =
+          error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined
         if (code !== "EEXIST") throw error
 
         try {
@@ -230,6 +256,126 @@ export namespace Database {
   export function close() {
     Client().$client.close()
     Client.reset()
+    for (const [, client] of projectClients) {
+      client.$client.close()
+    }
+    projectClients.clear()
+    if (cronClient) {
+      cronClient.$client.close()
+      cronClient = undefined
+    }
+  }
+
+  type DrizzleClient = ReturnType<typeof init>
+
+  let cronClient: DrizzleClient | undefined
+
+  export const CronClient = lazy(() => {
+    const p = cronPath()
+    log.info("opening cron database", { path: p })
+    const db = init(p)
+    db.run("PRAGMA journal_mode = WAL")
+    db.run("PRAGMA synchronous = NORMAL")
+    db.run("PRAGMA busy_timeout = 5000")
+    db.run("PRAGMA cache_size = -64000")
+    db.run("PRAGMA foreign_keys = ON")
+    db.run("PRAGMA wal_checkpoint(PASSIVE)")
+    applyMigrations(db)
+    return db
+  })
+
+  export function useCron<T>(callback: (trx: TxOrDb) => T): T {
+    try {
+      return callback(ctx.use().tx)
+    } catch (err) {
+      if (err instanceof Context.NotFound) {
+        const effects: (() => void | Promise<void>)[] = []
+        const result = ctx.provide({ effects, tx: CronClient() }, () => callback(CronClient()))
+        for (const effect of effects) effect()
+        return result
+      }
+      throw err
+    }
+  }
+
+  const projectClients = new Map<string, DrizzleClient>()
+
+  function applyMigrations(db: Client) {
+    const entries =
+      typeof OPENCODE_MIGRATIONS !== "undefined"
+        ? OPENCODE_MIGRATIONS
+        : migrations(path.join(import.meta.dirname, "../../migration"))
+    if (entries.length > 0) migrate(db, entries)
+  }
+
+  export function attach(projectId: string): DrizzleClient {
+    const existing = projectClients.get(projectId)
+    if (existing) return existing
+    const p = projectPath(projectId)
+    log.info("opening project database", { projectId, path: p })
+    const db = init(p)
+    db.run("PRAGMA journal_mode = WAL")
+    db.run("PRAGMA synchronous = NORMAL")
+    db.run("PRAGMA busy_timeout = 5000")
+    db.run("PRAGMA cache_size = -64000")
+    db.run("PRAGMA foreign_keys = ON")
+    db.run("PRAGMA wal_checkpoint(PASSIVE)")
+    applyMigrations(db)
+    projectClients.set(projectId, db)
+    return db
+  }
+
+  export function detach(projectId: string) {
+    const client = projectClients.get(projectId)
+    if (!client) return
+    log.info("closing project database", { projectId })
+    client.$client.close()
+    projectClients.delete(projectId)
+  }
+
+  export function projectClient(projectId: string): DrizzleClient {
+    return attach(projectId)
+  }
+
+  export function useProject<T>(projectId: string, callback: (trx: TxOrDb) => T): T {
+    const client = projectClient(projectId)
+    try {
+      return callback(ctx.use().tx)
+    } catch (err) {
+      if (err instanceof Context.NotFound) {
+        const effects: (() => void | Promise<void>)[] = []
+        const result = ctx.provide({ effects, tx: client }, () => callback(client))
+        for (const effect of effects) effect()
+        return result
+      }
+      throw err
+    }
+  }
+
+  export function transactionProject<T>(
+    projectId: string,
+    callback: (tx: TxOrDb) => NotPromise<T>,
+    options?: {
+      behavior?: "deferred" | "immediate" | "exclusive"
+    },
+  ): NotPromise<T> {
+    const client = projectClient(projectId)
+    try {
+      return callback(ctx.use().tx)
+    } catch (err) {
+      if (err instanceof Context.NotFound) {
+        const effects: (() => void | Promise<void>)[] = []
+        const result = client.transaction(
+          (tx: TxOrDb) => {
+            return ctx.provide({ tx, effects }, () => callback(tx))
+          },
+          { behavior: options?.behavior },
+        )
+        for (const effect of effects) effect()
+        return result as NotPromise<T>
+      }
+      throw err
+    }
   }
 
   export type TxOrDb = Transaction | Client

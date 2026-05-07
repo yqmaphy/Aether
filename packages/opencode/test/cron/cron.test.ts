@@ -3,12 +3,7 @@ import fs from "fs/promises"
 import path from "path"
 import { Cron } from "../../src/cron"
 import { CronJobStateTable, CronRunTable } from "../../src/cron/cron.sql"
-import {
-  CronCreateTool,
-  CronListTool,
-  CronRunNowTool,
-  CronSetGlobalEnabledTool,
-} from "../../src/tool/cron"
+import { CronCreateTool, CronListTool, CronRunNowTool, CronSetGlobalEnabledTool } from "../../src/tool/cron"
 import { ToolRegistry } from "../../src/tool/registry"
 import { Database, eq } from "../../src/storage/db"
 import { Global } from "../../src/global"
@@ -184,40 +179,37 @@ describe("Cron core", () => {
     }
   })
 
-  test(
-    "startup catch-up immediately runs overdue built-in memory reflection",
-    async () => {
-      const action = actionName("memory-catchup")
-      Cron.registerDirectAction(action, async () => ({
-        output_summary: "memory reflection catch-up test action",
-      }))
-      try {
-        await Cron.recover()
-        const jobPath = path.join(Global.Path.data, "cron", "jobs", "builtin-memory-reflection-daily.json")
-        const job = JSON.parse(await fs.readFile(jobPath, "utf8"))
-        job.payload = { ...job.payload, action }
-        await fs.writeFile(jobPath, JSON.stringify(job, null, 2))
-        setState("builtin-memory-reflection-daily", {
-          enabled: true,
-          running: false,
-          next_run_at: Date.now() - 5_000,
-        })
+  test("startup catch-up immediately runs overdue built-in memory reflection", async () => {
+    const action = actionName("memory-catchup")
+    Cron.registerDirectAction(action, async () => ({
+      output_summary: "memory reflection catch-up test action",
+    }))
+    try {
+      await Cron.recover()
+      const jobPath = path.join(Global.Path.data, "cron", "jobs", "builtin-memory-reflection-daily.json")
+      const job = JSON.parse(await fs.readFile(jobPath, "utf8"))
+      job.payload = { ...job.payload, action }
+      await fs.writeFile(jobPath, JSON.stringify(job, null, 2))
+      setState("builtin-memory-reflection-daily", {
+        enabled: true,
+        running: false,
+        next_run_at: Date.now() - 5_000,
+      })
 
-        const run = await Cron.catchUpMissedMemoryReflection()
-        const runs = await Cron.listRuns({ id: "builtin-memory-reflection-daily", count: 10 })
-        const next = state("builtin-memory-reflection-daily")
+      const run = await Cron.catchUpMissedMemoryReflection()
+      const runs = await Cron.listRuns({ id: "builtin-memory-reflection-daily", count: 10 })
+      const next = state("builtin-memory-reflection-daily")
 
-        expect(run?.job_id).toBe("builtin-memory-reflection-daily")
-        expect(run?.trigger_reason).toBe("scheduled")
-        expect(runs).toHaveLength(1)
-        expect(next?.running).toBe(false)
-        expect(next?.last_status).toBe("success")
-        expect(next?.next_run_at).toBeGreaterThan(Date.now())
-      } finally {
-        Cron.unregisterDirectAction(action)
-      }
-    },
-  )
+      expect(run?.job_id).toBe("builtin-memory-reflection-daily")
+      expect(run?.trigger_reason).toBe("scheduled")
+      expect(runs).toHaveLength(1)
+      expect(next?.running).toBe(false)
+      expect(next?.last_status).toBe("success")
+      expect(next?.next_run_at).toBeGreaterThan(Date.now())
+    } finally {
+      Cron.unregisterDirectAction(action)
+    }
+  })
 
   test("runJobNow executes a registered direct action and records success", async () => {
     const action = actionName("success")
@@ -548,7 +540,7 @@ describe("Cron core", () => {
       directory: tmp.path,
       fn: async () => {
         const session = await Session.create({ title: "cron global notify" })
-        expect(session.projectID).toBe(ProjectID.global)
+        expect(session.projectID).not.toBe(ProjectID.global)
         expect(session.directory).toBe(tmp.path)
 
         const created = await Cron.createJob({

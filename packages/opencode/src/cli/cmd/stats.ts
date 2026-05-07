@@ -1,4 +1,5 @@
 import type { Argv } from "yargs"
+import path from "path"
 import { cmd } from "./cmd"
 import { Session } from "../../session"
 import { bootstrap } from "../bootstrap"
@@ -87,9 +88,21 @@ async function getCurrentProject(): Promise<Project.Info> {
   return Instance.project
 }
 
+function projectIdFromPath(dbPath: string): string {
+  const globalPrefix = path.basename(Database.getChannelPath()).replace(/\.db$/, "") + "-"
+  const basename = path.basename(dbPath)
+  return basename.slice(globalPrefix.length).replace(/\.db$/, "")
+}
+
 async function getAllSessions(): Promise<Session.Info[]> {
-  const rows = Database.use((db) => db.select().from(SessionTable).all())
-  return rows.map((row) => Session.fromRow(row))
+  const projectPaths = Database.projectPaths()
+  const sessions: Session.Info[] = []
+  for (const dbPath of projectPaths) {
+    const projectId = projectIdFromPath(dbPath)
+    const rows = Database.useProject(projectId, (db) => db.select().from(SessionTable).all())
+    sessions.push(...rows.map((row) => Session.fromRow(row)))
+  }
+  return sessions
 }
 
 export async function aggregateSessionStats(days?: number, projectFilter?: string): Promise<SessionStats> {

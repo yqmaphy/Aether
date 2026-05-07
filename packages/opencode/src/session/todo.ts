@@ -3,6 +3,7 @@ import { Bus } from "@/bus"
 import { SessionID } from "./schema"
 import z from "zod"
 import { Database, eq, asc } from "../storage/db"
+import { Instance } from "../project/instance"
 import { TodoTable } from "./session.sql"
 
 export namespace Todo {
@@ -45,7 +46,7 @@ export namespace Todo {
   }
 
   export function get(sessionID: SessionID) {
-    const rows = Database.use((db) =>
+    const rows = Database.useProject(Instance.project.id, (db) =>
       db.select().from(TodoTable).where(eq(TodoTable.session_id, sessionID)).orderBy(asc(TodoTable.position)).all(),
     )
     return rows.map((row) => ({

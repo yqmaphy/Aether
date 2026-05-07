@@ -411,13 +411,10 @@ export namespace File {
     opts: {
       expectedChecksum?: string
     } = {},
-  ): Promise<
-    | void
-    | {
-        currentChecksum: string
-        currentContent: string
-      }
-  > {
+  ): Promise<void | {
+    currentChecksum: string
+    currentContent: string
+  }> {
     const resolved = path.join(Instance.directory, filePath)
     if (!Instance.containsPath(resolved)) {
       throw new Error("Access denied: path escapes project directory")
@@ -667,7 +664,7 @@ export namespace File {
 
       const scan = Effect.fn("File.scan")(function* () {
         if (Instance.directory === path.parse(Instance.directory).root) return
-        const isGlobalHome = Instance.directory === Global.Path.home && Instance.project.id === "global"
+        const isGlobalHome = Instance.directory === Global.Path.home && Instance.project.worktree === "/"
         const next: Entry = { files: [], dirs: [] }
 
         yield* Effect.promise(async () => {

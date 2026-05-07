@@ -3,6 +3,7 @@ import { SessionID, MessageID, PartID } from "./schema"
 import z from "zod"
 import { NamedError } from "@opencode-ai/util/error"
 import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
+import { Instance } from "../project/instance"
 import { LSP } from "../lsp"
 import { Snapshot } from "@/snapshot"
 import { fn } from "@/util/fn"
@@ -557,7 +558,7 @@ export namespace MessageV2 {
     const ids = rows.map((row) => row.id)
     const partByMessage = new Map<string, MessageV2.Part[]>()
     if (ids.length > 0) {
-      const partRows = Database.use((db) =>
+      const partRows = Database.useProject(Instance.project.id, (db) =>
         db
           .select()
           .from(PartTable)
@@ -865,7 +866,7 @@ export namespace MessageV2 {
       const where = before
         ? and(eq(MessageTable.session_id, input.sessionID), older(before))
         : eq(MessageTable.session_id, input.sessionID)
-      const rows = Database.use((db) =>
+      const rows = Database.useProject(Instance.project.id, (db) =>
         db
           .select()
           .from(MessageTable)
@@ -875,7 +876,7 @@ export namespace MessageV2 {
           .all(),
       )
       if (rows.length === 0) {
-        const row = Database.use((db) =>
+        const row = Database.useProject(Instance.project.id, (db) =>
           db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get(),
         )
         if (!row) throw new NotFoundError({ message: `Session not found: ${input.sessionID}` })
@@ -913,7 +914,7 @@ export namespace MessageV2 {
   })
 
   export const parts = fn(MessageID.zod, async (message_id) => {
-    const rows = Database.use((db) =>
+    const rows = Database.useProject(Instance.project.id, (db) =>
       db.select().from(PartTable).where(eq(PartTable.message_id, message_id)).orderBy(PartTable.id).all(),
     )
     return rows.map(
@@ -927,7 +928,7 @@ export namespace MessageV2 {
       messageID: MessageID.zod,
     }),
     async (input): Promise<WithParts> => {
-      const row = Database.use((db) =>
+      const row = Database.useProject(Instance.project.id, (db) =>
         db
           .select()
           .from(MessageTable)

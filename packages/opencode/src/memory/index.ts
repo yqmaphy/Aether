@@ -45,9 +45,7 @@ type ParsedTypedEntry = {
   canonical: string
 }
 
-type ReflectionObjectGenerator = (
-  params: Parameters<typeof generateObject>[0],
-) => Promise<{
+type ReflectionObjectGenerator = (params: Parameters<typeof generateObject>[0]) => Promise<{
   object: ReflectionResult
 }>
 
@@ -136,9 +134,8 @@ function usage(entries: string[]) {
 function scopeKey() {
   const workspaceID = WorkspaceContext.workspaceID
   if (workspaceID) return `workspace-${workspaceID}`
-  if (Instance.project.id !== ProjectID.global) return `project-${Instance.project.id}`
-  const digest = createHash("sha1").update(Filesystem.resolve(Instance.directory)).digest("hex").slice(0, 20)
-  return `directory-${digest}`
+  if (Instance.project.worktree !== "/") return `project-${Instance.project.id}`
+  return `project-${Instance.project.id}`
 }
 
 function memoryPath(store: "user" | "memory") {
@@ -263,7 +260,7 @@ function sessionScopeFilter(scope: "current_project" | "global") {
     }
   }
 
-  if (Instance.project.id !== ProjectID.global) {
+  if (Instance.project.worktree !== "/") {
     return {
       sql: "and s.project_id = ?",
       args: [Instance.project.id],
@@ -272,12 +269,11 @@ function sessionScopeFilter(scope: "current_project" | "global") {
     }
   }
 
-  const directory = Filesystem.resolve(Instance.directory)
   return {
-    sql: "and s.project_id = ? and s.directory = ?",
-    args: [ProjectID.global, directory],
+    sql: "and s.project_id = ?",
+    args: [Instance.project.id],
     match: (session: { project_id: string; workspace_id: string | null; directory: string }) =>
-      session.project_id === ProjectID.global && Filesystem.resolve(session.directory) === directory,
+      session.project_id === Instance.project.id,
   }
 }
 
@@ -333,12 +329,12 @@ function inboxMatchKey(entry: string) {
   return normalizeSessionMemoryEntry(entry).toLowerCase()
 }
 
-  async function removeInboxEntries(match: Set<string>) {
-    if (!match.size) return
-    await withInboxWriteLock(async (loaded) => {
-      const nextEntries = loaded.entries.filter((entry) => !match.has(inboxMatchKey(entry)))
-      if (JSON.stringify(nextEntries) !== JSON.stringify(loaded.entries)) {
-        await saveInboxMemory(nextEntries, loaded.file)
+async function removeInboxEntries(match: Set<string>) {
+  if (!match.size) return
+  await withInboxWriteLock(async (loaded) => {
+    const nextEntries = loaded.entries.filter((entry) => !match.has(inboxMatchKey(entry)))
+    if (JSON.stringify(nextEntries) !== JSON.stringify(loaded.entries)) {
+      await saveInboxMemory(nextEntries, loaded.file)
     }
   })
 }
@@ -411,7 +407,7 @@ async function filterSessionMemoryFilesByScope(
   if (scope !== "current_scope" || files.length === 0) return files
 
   const ids = files.map((file) => SessionID.make(file.session_id))
-  const rows = Database.use((db) =>
+  const rows = Database.useProject(Instance.project.id, (db) =>
     db
       .select()
       .from(SessionTable)
@@ -669,16 +665,18 @@ export namespace Memory {
   export const ReflectionTrigger = z.enum(["manual", "cron"])
   export type ReflectionTrigger = z.infer<typeof ReflectionTrigger>
 
-  const liveEvents = Instance.state(() => new Map<string, Event[]>(), async (map) => map.clear())
-  const frozenSnapshots = Instance.state(
-    () =>
-      new Map<
-        string,
-        PreparedSnapshot
-      >(),
+  const liveEvents = Instance.state(
+    () => new Map<string, Event[]>(),
     async (map) => map.clear(),
   )
-  const activeMemory = Instance.state(() => new Map<string, ActiveState>(), async (map) => map.clear())
+  const frozenSnapshots = Instance.state(
+    () => new Map<string, PreparedSnapshot>(),
+    async (map) => map.clear(),
+  )
+  const activeMemory = Instance.state(
+    () => new Map<string, ActiveState>(),
+    async (map) => map.clear(),
+  )
 
   function enqueueEvents(sessionID: string, events: Event[]) {
     if (!events.length) return
@@ -1043,7 +1041,8 @@ export namespace Memory {
       }
 
       while (usage(nextEntries) > INBOX_MEMORY_LIMIT && nextEntries.length > 0) nextEntries.shift()
-      if (JSON.stringify(nextEntries) !== JSON.stringify(loaded.entries)) await saveInboxMemory(nextEntries, loaded.file)
+      if (JSON.stringify(nextEntries) !== JSON.stringify(loaded.entries))
+        await saveInboxMemory(nextEntries, loaded.file)
       if (!added) return undefined
       return poolEntry({
         source: "inbox",
@@ -1055,11 +1054,7 @@ export namespace Memory {
     })
   }
 
-  async function pinEntries(input: {
-    session_id: string
-    entries: PoolEntry[]
-    pinned_by: ActiveEntry["pinned_by"]
-  }) {
+  async function pinEntries(input: { session_id: string; entries: PoolEntry[]; pinned_by: ActiveEntry["pinned_by"] }) {
     if (!input.entries.length) return
     const snapshot = await prepare({ session_id: input.session_id })
     const active = await readActive(input.session_id)
@@ -1708,8 +1703,9 @@ export namespace Memory {
       })
       const today = await loadDailyMemoryFile(dayKey())
       const seenDaily = new Set(
-        [...daily.days.flatMap((day) => day.entries), ...today.entries]
-          .map((entry) => typedEntryContentKey(entry) ?? entry.toLowerCase())
+        [...daily.days.flatMap((day) => day.entries), ...today.entries].map(
+          (entry) => typedEntryContentKey(entry) ?? entry.toLowerCase(),
+        ),
       )
       const dailyEntries: string[] = []
       for (const entry of reflected.daily_memory.map(serializeDailyEntry).filter(Boolean)) {
@@ -1738,7 +1734,8 @@ export namespace Memory {
         if (nextDaily.length !== today.entries.length) {
           await Filesystem.write(today.file, serializeStore("memory", nextDaily))
         }
-        if (JSON.stringify(userResult.entries) !== JSON.stringify(user.validEntries)) await saveUserStore(userResult.entries)
+        if (JSON.stringify(userResult.entries) !== JSON.stringify(user.validEntries))
+          await saveUserStore(userResult.entries)
         if (inboxEntries.length) {
           const reflectedInbox = reflectedInboxKeysForCleanup({
             scope,
@@ -1760,7 +1757,11 @@ export namespace Memory {
         scope,
         trigger,
         dry_run: dryRun,
-        session_files: sessionFiles.map((file) => ({ session_id: file.session_id, file: file.file, mtime: file.mtime })),
+        session_files: sessionFiles.map((file) => ({
+          session_id: file.session_id,
+          file: file.file,
+          mtime: file.mtime,
+        })),
         daily_file: today.file,
         user_file: user.file,
         inbox_file: inbox.file,
@@ -1776,7 +1777,11 @@ export namespace Memory {
         scope,
         trigger,
         dry_run: dryRun,
-        session_files: sessionFiles.map((file) => ({ session_id: file.session_id, file: file.file, mtime: file.mtime })),
+        session_files: sessionFiles.map((file) => ({
+          session_id: file.session_id,
+          file: file.file,
+          mtime: file.mtime,
+        })),
         inbox_file: inbox.file,
         inbox_entries: inboxEntries.length,
         summary: message,

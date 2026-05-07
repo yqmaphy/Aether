@@ -1,4 +1,5 @@
 import { GlobalBus } from "@/bus/global"
+import { Database } from "@/storage/db"
 import { disposeInstance } from "@/effect/instance-registry"
 import { Filesystem } from "@/util/filesystem"
 import { iife } from "@/util/iife"
@@ -45,6 +46,7 @@ function boot(input: { directory: string; init?: () => Promise<any>; project?: P
             worktree: sandbox,
             project,
           }))
+    Database.attach(ctx.project.id)
     await context.provide(ctx, async () => {
       await input.init?.()
     })
@@ -130,8 +132,10 @@ export const Instance = {
   },
   async dispose() {
     const directory = Instance.directory
+    const projectId = Instance.project.id
     Log.Default.info("disposing instance", { directory })
     await Promise.all([State.dispose(directory), disposeInstance(directory)])
+    Database.detach(projectId)
     cache.delete(directory)
     emit(directory)
   },

@@ -10,22 +10,7 @@ import { Config } from "../config/config"
 import { Flag } from "../flag/flag"
 import { Installation } from "../installation"
 
-import {
-  Database,
-  NotFoundError,
-  eq,
-  and,
-  or,
-  ne,
-  gte,
-  isNull,
-  isNotNull,
-  desc,
-  like,
-  inArray,
-  lt,
-  asc,
-} from "../storage/db"
+import { Database, NotFoundError, eq, and, or, ne, gte, isNull, isNotNull, desc, like, lt, asc } from "../storage/db"
 import { SyncEvent } from "../sync"
 import type { SQL } from "../storage/db"
 import { SessionTable } from "./session.sql"
@@ -168,7 +153,7 @@ export namespace Session {
   }
 
   async function getNextForkIndex(input: { projectID: ProjectID; treeID: TreeID }) {
-    const rows = Database.use((db) =>
+    const rows = Database.useProject(input.projectID, (db) =>
       db
         .select({
           forkIndex: SessionTable.fork_index,
@@ -329,7 +314,7 @@ export namespace Session {
   }
 
   async function repairTreeForkParents(input: { projectID: ProjectID; treeID: TreeID }) {
-    const rows = Database.use((db) =>
+    const rows = Database.useProject(input.projectID, (db) =>
       db
         .select()
         .from(SessionTable)
@@ -388,7 +373,7 @@ export namespace Session {
   }
 
   async function collectSessionSubtree(input: { projectID: ProjectID; rootSessionID: SessionID }) {
-    const rows = Database.use((db) =>
+    const rows = Database.useProject(input.projectID, (db) =>
       db
         .select()
         .from(SessionTable)
@@ -852,7 +837,9 @@ export namespace Session {
   }
 
   export const get = fn(SessionID.zod, async (id) => {
-    const row = Database.use((db) => db.select().from(SessionTable).where(eq(SessionTable.id, id)).get())
+    const row = Database.useProject(Instance.project.id, (db) =>
+      db.select().from(SessionTable).where(eq(SessionTable.id, id)).get(),
+    )
     if (!row) throw new NotFoundError({ message: `Session not found: ${id}` })
     return fromRow(row)
   })
@@ -1101,7 +1088,7 @@ export namespace Session {
 
     const limit = input?.limit ?? 100
 
-    const rows = Database.use((db) =>
+    const rows = Database.useProject(project.id, (db) =>
       db
         .select()
         .from(SessionTable)
@@ -1151,33 +1138,50 @@ export namespace Session {
 
     const limit = input?.limit ?? 100
 
-    const rows = Database.use((db) => {
-      const query =
+    const effectiveChannel =
+      ["latest", "beta"].includes(Installation.CHANNEL) || Flag.OPENCODE_DISABLE_CHANNEL_DB
+        ? "latest"
+        : Installation.CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")
+    const prefix = `aether-${effectiveChannel}-`
+
+    const allSessions: SessionRow[] = []
+    for (const pPath of Database.projectPaths()) {
+      const fileName = path.basename(pPath)
+      if (!fileName.startsWith(prefix) || !fileName.endsWith(".db")) continue
+      const pid = fileName.slice(prefix.length, fileName.length - ".db".length)
+      const rows = Database.useProject(pid, (db) =>
         conditions.length > 0
           ? db
               .select()
               .from(SessionTable)
               .where(and(...conditions))
-          : db.select().from(SessionTable)
-      return query.orderBy(desc(SessionTable.time_updated), desc(SessionTable.id)).limit(limit).all()
-    })
+              .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+              .limit(limit)
+              .all()
+          : db
+              .select()
+              .from(SessionTable)
+              .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+              .limit(limit)
+              .all(),
+      )
+      allSessions.push(...rows)
+    }
+    allSessions.sort((a, b) => b.time_updated - a.time_updated || b.id.localeCompare(a.id))
+    const rows = allSessions.slice(0, limit)
 
     const ids = [...new Set(rows.map((row) => row.project_id))]
     const projects = new Map<string, ProjectInfo>()
 
-    if (ids.length > 0) {
-      const items = Database.use((db) =>
-        db
-          .select({ id: ProjectTable.id, name: ProjectTable.name, worktree: ProjectTable.worktree })
-          .from(ProjectTable)
-          .where(inArray(ProjectTable.id, ids))
-          .all(),
+    for (const pid of ids) {
+      const projectRow = Database.useProject(pid, (db) =>
+        db.select().from(ProjectTable).where(eq(ProjectTable.id, pid)).get(),
       )
-      for (const item of items) {
-        projects.set(item.id, {
-          id: item.id,
-          name: item.name ?? undefined,
-          worktree: item.worktree,
+      if (projectRow) {
+        projects.set(pid, {
+          id: projectRow.id,
+          name: projectRow.name ?? undefined,
+          worktree: projectRow.worktree,
         })
       }
     }
@@ -1190,7 +1194,7 @@ export namespace Session {
 
   export const children = fn(SessionID.zod, async (parentID) => {
     const project = Instance.project
-    const rows = Database.use((db) =>
+    const rows = Database.useProject(project.id, (db) =>
       db
         .select()
         .from(SessionTable)
@@ -1214,7 +1218,7 @@ export namespace Session {
     })
     const treeID = session.treeID
 
-    const rows = Database.use((db) =>
+    const rows = Database.useProject(session.projectID, (db) =>
       db
         .select()
         .from(SessionTable)
@@ -1303,7 +1307,7 @@ export namespace Session {
     })
     const treeID = currentSession.treeID
 
-    const allTreeSessions = Database.use((db) =>
+    const allTreeSessions = Database.useProject(currentSession.projectID, (db) =>
       db
         .select()
         .from(SessionTable)

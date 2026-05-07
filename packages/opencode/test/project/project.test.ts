@@ -68,7 +68,7 @@ describe("Project.fromDirectory", () => {
     const { project } = await Project.fromDirectory(tmp.path)
 
     expect(project).toBeDefined()
-    expect(project.id).toBe(ProjectID.global)
+    expect(project.id).not.toBe(ProjectID.global)
     expect(project.vcs).toBe("git")
     expect(project.worktree).toBe(tmp.path)
 
@@ -90,10 +90,11 @@ describe("Project.fromDirectory", () => {
     expect(await Bun.file(opencodeFile).exists()).toBe(true)
   })
 
-  test("returns global for non-git directory", async () => {
+  test("returns hash-based id for non-git directory", async () => {
     await using tmp = await tmpdir()
     const { project } = await Project.fromDirectory(tmp.path)
-    expect(project.id).toBe(ProjectID.global)
+    expect(project.id).not.toBe(ProjectID.global)
+    expect(project.id.length).toBe(16)
   })
 
   test("derives stable project ID from root commit", async () => {
@@ -112,7 +113,7 @@ describe("Project.fromDirectory git failure paths", () => {
     // rev-list fails because HEAD doesn't exist yet — this is the natural scenario
     const { project } = await Project.fromDirectory(tmp.path)
     expect(project.vcs).toBe("git")
-    expect(project.id).toBe(ProjectID.global)
+    expect(project.id).not.toBe(ProjectID.global)
     expect(project.worktree).toBe(tmp.path)
   })
 
