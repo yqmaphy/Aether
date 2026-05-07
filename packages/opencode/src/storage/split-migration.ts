@@ -254,7 +254,7 @@ export namespace SplitMigration {
     );
   `
 
-  function copyMigrationRecords(
+  function seedMigrationRecords(
     sqlite: BunDatabase,
     srcSqlite: BunDatabase,
     extra: { hash: string; millis: number; name: string },
@@ -277,6 +277,19 @@ export namespace SplitMigration {
     )
     for (const row of rows) insert.run(row.hash, row.created_at, row.name, row.applied_at ?? new Date().toISOString())
     insert.run(extra.hash, extra.millis, extra.name, new Date().toISOString())
+  }
+
+  function appendMigrationRecord(sqlite: BunDatabase, extra: { hash: string; millis: number; name: string }) {
+    sqlite.exec(`CREATE TABLE IF NOT EXISTS __drizzle_migrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      hash TEXT NOT NULL,
+      created_at numeric,
+      name text,
+      applied_at TEXT
+    )`)
+    sqlite
+      .prepare("INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)")
+      .run(extra.hash, extra.millis, extra.name, new Date().toISOString())
   }
 
   const projectDbSchema = [
@@ -563,12 +576,12 @@ export namespace SplitMigration {
     for (const projectId of uniqueProjectIds) {
       const pPath = projectDbPath(projectId)
       const pSqlite = new BunDatabase(pPath)
-      copyMigrationRecords(pSqlite, srcSqlite, migrationMeta!)
+      seedMigrationRecords(pSqlite, srcSqlite, migrationMeta!)
       pSqlite.close()
     }
     const cPath = cronDbPath()
     const cSqlite2 = new BunDatabase(cPath)
-    copyMigrationRecords(cSqlite2, srcSqlite, migrationMeta!)
+    seedMigrationRecords(cSqlite2, srcSqlite, migrationMeta!)
     cSqlite2.close()
 
     const cSqlite = initDb(cronDbPath(), [cronTableSQL])
@@ -642,7 +655,7 @@ export namespace SplitMigration {
         .run(newId, dir)
     }
     destSqlite.exec("COMMIT")
-    copyMigrationRecords(destSqlite, srcSqlite, migrationMeta!)
+    appendMigrationRecord(destSqlite, migrationMeta!)
     destSqlite.close()
 
     srcSqlite.close()
