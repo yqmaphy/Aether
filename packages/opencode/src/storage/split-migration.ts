@@ -254,17 +254,16 @@ export namespace SplitMigration {
     );
   `
 
-  const drizzleMigrationsSQL = `
-    CREATE TABLE IF NOT EXISTS __drizzle_migrations (
+  function markMigrationApplied(sqlite: BunDatabase, hash: string, millis: number, name: string) {
+    sqlite.exec(`CREATE TABLE IF NOT EXISTS __drizzle_migrations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       hash TEXT NOT NULL UNIQUE,
-      created_at INTEGER
-    );
-  `
-
-  function markMigrationApplied(sqlite: BunDatabase, hash: string) {
-    sqlite.exec(drizzleMigrationsSQL)
-    sqlite.prepare("INSERT OR IGNORE INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)").run(hash, Date.now())
+      created_at INTEGER NOT NULL,
+      name TEXT NOT NULL
+    )`)
+    sqlite
+      .prepare("INSERT OR IGNORE INTO __drizzle_migrations (hash, created_at, name) VALUES (?, ?, ?)")
+      .run(hash, millis, name)
   }
 
   const projectDbSchema = [
@@ -535,12 +534,15 @@ export namespace SplitMigration {
 
     log.info("created project databases", { count: projectCount })
 
-    const migrationHash = (() => {
+    const migrationMeta = (() => {
       const migrationDir = path.join(import.meta.dirname, "../../migration/20260507071748_per_project_db_split")
       const sqlFile = path.join(migrationDir, "migration.sql")
       if (!existsSync(sqlFile)) return undefined
       const sql = readFileSync(sqlFile, "utf-8")
-      return createHash("sha256").update(sql).digest("hex")
+      const hash = createHash("sha256").update(sql).digest("hex")
+      const name = "20260507071748_per_project_db_split"
+      const millis = Date.UTC(2026, 4, 7, 7, 17, 48)
+      return { hash, name, millis }
     })()
 
     // Mark the per-project-db-split migration as already applied on all new dbs
@@ -548,12 +550,12 @@ export namespace SplitMigration {
     for (const projectId of uniqueProjectIds) {
       const pPath = projectDbPath(projectId)
       const pSqlite = new BunDatabase(pPath)
-      markMigrationApplied(pSqlite, migrationHash!)
+      markMigrationApplied(pSqlite, migrationMeta!.hash, migrationMeta!.millis, migrationMeta!.name)
       pSqlite.close()
     }
     const cPath = cronDbPath()
     const cSqlite2 = new BunDatabase(cPath)
-    markMigrationApplied(cSqlite2, migrationHash!)
+    markMigrationApplied(cSqlite2, migrationMeta!.hash, migrationMeta!.millis, migrationMeta!.name)
     cSqlite2.close()
 
     const cSqlite = initDb(cronDbPath(), [cronTableSQL])
@@ -627,7 +629,7 @@ export namespace SplitMigration {
         .run(newId, dir)
     }
     destSqlite.exec("COMMIT")
-    markMigrationApplied(destSqlite, migrationHash!)
+    markMigrationApplied(destSqlite, migrationMeta!.hash, migrationMeta!.millis, migrationMeta!.name)
     destSqlite.close()
 
     srcSqlite.close()
