@@ -20,6 +20,16 @@ export namespace SplitMigration {
     return ch.replace(/[^a-zA-Z0-9._-]/g, "-")
   }
 
+  function channelDir() {
+    return path.join(Global.Path.data, channel())
+  }
+
+  function ensureChannelDir() {
+    const dir = channelDir()
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    return dir
+  }
+
   function mainDbPath() {
     const ch = channel()
     if (ch === "latest") return path.join(Global.Path.data, "aether.db")
@@ -27,11 +37,11 @@ export namespace SplitMigration {
   }
 
   function cronDbPath() {
-    return path.join(Global.Path.data, `aether-${channel()}-cron.db`)
+    return path.join(ensureChannelDir(), `aether-cron.db`)
   }
 
   function projectDbPath(projectId: string) {
-    return path.join(Global.Path.data, `aether-${channel()}-${projectId}.db`)
+    return path.join(ensureChannelDir(), `aether-${projectId}.db`)
   }
 
   export function needsMigration(): boolean {

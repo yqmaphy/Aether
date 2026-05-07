@@ -44,27 +44,38 @@ export namespace Database {
     return ch.replace(/[^a-zA-Z0-9._-]/g, "-")
   }
 
+  export function channelDir() {
+    return path.join(Global.Path.data, channel())
+  }
+
   export function getChannelPath() {
     if (["latest", "beta"].includes(Installation.CHANNEL) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
       return path.join(Global.Path.data, "aether.db")
     return path.join(Global.Path.data, `aether-${channel()}.db`)
   }
 
+  function ensureChannelDir() {
+    const dir = channelDir()
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    return dir
+  }
+
   export function cronPath() {
-    return path.join(Global.Path.data, `aether-${channel()}-cron.db`)
+    return path.join(ensureChannelDir(), `aether-cron.db`)
   }
 
   export function projectPath(projectId: string) {
-    return path.join(Global.Path.data, `aether-${channel()}-${projectId}.db`)
+    return path.join(ensureChannelDir(), `aether-${projectId}.db`)
   }
 
   export function projectPaths(): string[] {
-    const ch = channel()
-    const pattern = new RegExp(`^aether-${ch}-.+\\.db$`)
+    const dir = channelDir()
+    if (!existsSync(dir)) return []
+    const pattern = new RegExp(`^aether-.+\\.db$`)
     try {
-      return readdirSync(Global.Path.data, { withFileTypes: true })
+      return readdirSync(dir, { withFileTypes: true })
         .filter((entry) => entry.isFile() && pattern.test(entry.name))
-        .map((entry) => path.join(Global.Path.data, entry.name))
+        .map((entry) => path.join(dir, entry.name))
         .sort()
     } catch {
       return []
@@ -86,10 +97,12 @@ export namespace Database {
   export function knownPaths() {
     const current = Path
     const currentFile = current === ":memory:" ? undefined : norm(current)
+    const ch = channel()
+    const projectCronPattern = new RegExp(`^aether-${ch}-(cron|[0-9a-f]+)\\.db$`, "i")
     try {
       const seen = new Set<string>()
       return readdirSync(Global.Path.data, { withFileTypes: true })
-        .filter((entry) => entry.isFile() && /^aether.*\.db$/i.test(entry.name))
+        .filter((entry) => entry.isFile() && /^aether.*\.db$/i.test(entry.name) && !projectCronPattern.test(entry.name))
         .map((entry) => path.join(Global.Path.data, entry.name))
         .sort()
         .filter((file) => {
