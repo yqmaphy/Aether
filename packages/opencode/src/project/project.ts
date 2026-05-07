@@ -613,12 +613,12 @@ export namespace Project {
       })
 
       const get = Effect.fn("Project.get")(function* (id: ProjectID) {
-        const row = yield* db((d) => d.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
+        const row = yield* dbProject(id, (d) => d.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
         return row ? fromRow(row) : undefined
       })
 
       const update = Effect.fn("Project.update")(function* (input: UpdateInput) {
-        const result = yield* db((d) =>
+        const result = yield* dbProject(input.projectID, (d) =>
           d
             .update(ProjectTable)
             .set({
@@ -649,13 +649,13 @@ export namespace Project {
       })
 
       const setInitialized = Effect.fn("Project.setInitialized")(function* (id: ProjectID) {
-        yield* db((d) =>
+        yield* dbProject(id, (d) =>
           d.update(ProjectTable).set({ time_initialized: Date.now() }).where(eq(ProjectTable.id, id)).run(),
         )
       })
 
       const sandboxes = Effect.fn("Project.sandboxes")(function* (id: ProjectID) {
-        const row = yield* db((d) => d.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
+        const row = yield* dbProject(id, (d) => d.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
         if (!row) return []
         const data = fromRow(row)
         return yield* Effect.forEach(
@@ -670,11 +670,11 @@ export namespace Project {
       })
 
       const addSandbox = Effect.fn("Project.addSandbox")(function* (id: ProjectID, directory: string) {
-        const row = yield* db((d) => d.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
+        const row = yield* dbProject(id, (d) => d.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
         if (!row) throw new Error(`Project not found: ${id}`)
         const sboxes = [...row.sandboxes]
         if (!sboxes.includes(directory)) sboxes.push(directory)
-        const result = yield* db((d) =>
+        const result = yield* dbProject(id, (d) =>
           d
             .update(ProjectTable)
             .set({ sandboxes: sboxes, time_updated: Date.now() })
@@ -687,10 +687,10 @@ export namespace Project {
       })
 
       const removeSandbox = Effect.fn("Project.removeSandbox")(function* (id: ProjectID, directory: string) {
-        const row = yield* db((d) => d.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
+        const row = yield* dbProject(id, (d) => d.select().from(ProjectTable).where(eq(ProjectTable.id, id)).get())
         if (!row) throw new Error(`Project not found: ${id}`)
         const sboxes = row.sandboxes.filter((s) => s !== directory)
-        const result = yield* db((d) =>
+        const result = yield* dbProject(id, (d) =>
           d
             .update(ProjectTable)
             .set({ sandboxes: sboxes, time_updated: Date.now() })

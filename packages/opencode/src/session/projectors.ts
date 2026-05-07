@@ -3,7 +3,7 @@ import { SyncEvent } from "@/sync"
 import { Session } from "./index"
 import { MessageV2 } from "./message-v2"
 import { SessionTable, MessageTable, PartTable } from "./session.sql"
-import { ProjectTable } from "../project/project.sql"
+
 import { Instance } from "../project/instance"
 import { Log } from "../util/log"
 

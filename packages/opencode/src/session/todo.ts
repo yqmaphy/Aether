@@ -27,7 +27,7 @@ export namespace Todo {
   }
 
   export function update(input: { sessionID: SessionID; todos: Info[] }) {
-    Database.transaction((db) => {
+    Database.transactionProject(Instance.project.id, (db) => {
       db.delete(TodoTable).where(eq(TodoTable.session_id, input.sessionID)).run()
       if (input.todos.length === 0) return
       db.insert(TodoTable)

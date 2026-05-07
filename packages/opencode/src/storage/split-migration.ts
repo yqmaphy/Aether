@@ -214,7 +214,7 @@ export namespace SplitMigration {
     );
   `
 
-  const cronTableSQL = `
+  export const cronTableSQL = `
     CREATE TABLE IF NOT EXISTS cron_job_state (
       job_id TEXT PRIMARY KEY,
       enabled INTEGER NOT NULL,
@@ -292,7 +292,42 @@ export namespace SplitMigration {
       .run(extra.hash, extra.millis, extra.name, new Date().toISOString())
   }
 
-  const projectDbSchema = [
+  const stripProjectRecentFK = `
+    CREATE TABLE __new_project_recent (
+      key text PRIMARY KEY,
+      kind text NOT NULL,
+      project_id text,
+      directory text NOT NULL,
+      name text,
+      icon_url text,
+      icon_color text,
+      icon_override text,
+      activity_at integer NOT NULL,
+      time_created integer NOT NULL,
+      time_updated integer NOT NULL
+    );
+    INSERT INTO __new_project_recent(key, kind, project_id, directory, name, icon_url, icon_color, icon_override, activity_at, time_created, time_updated) SELECT key, kind, project_id, directory, name, icon_url, icon_color, icon_override, activity_at, time_created, time_updated FROM project_recent;
+    DROP TABLE project_recent;
+    ALTER TABLE __new_project_recent RENAME TO project_recent;
+  `
+
+  const stripSessionPreferenceFK = `
+    CREATE TABLE __new_session_preference (
+      session_id text PRIMARY KEY,
+      agent text,
+      model_provider_id text,
+      model_id text,
+      variant text,
+      auto_accept integer,
+      time_created integer NOT NULL,
+      time_updated integer NOT NULL
+    );
+    INSERT INTO __new_session_preference(session_id, agent, model_provider_id, model_id, variant, auto_accept, time_created, time_updated) SELECT session_id, agent, model_provider_id, model_id, variant, auto_accept, time_created, time_updated FROM session_preference;
+    DROP TABLE session_preference;
+    ALTER TABLE __new_session_preference RENAME TO session_preference;
+  `
+
+  export const projectDbSchema = [
     projectTableSQL,
     sessionTableSQL,
     messageTableSQL,
@@ -638,22 +673,23 @@ export namespace SplitMigration {
         )
         .run(dir, newId, Date.now(), Date.now())
     }
-    destSqlite.exec("DELETE FROM session")
-    destSqlite.exec("DELETE FROM message")
-    destSqlite.exec("DELETE FROM part")
-    destSqlite.exec("DELETE FROM todo")
-    destSqlite.exec("DELETE FROM permission")
-    destSqlite.exec("DELETE FROM session_share")
-    destSqlite.exec("DELETE FROM workspace")
-    destSqlite.exec("DELETE FROM cron_job_state")
-    destSqlite.exec("DELETE FROM cron_run")
-    destSqlite.exec("DELETE FROM project")
+    destSqlite.exec("DROP TABLE IF EXISTS session")
+    destSqlite.exec("DROP TABLE IF EXISTS message")
+    destSqlite.exec("DROP TABLE IF EXISTS part")
+    destSqlite.exec("DROP TABLE IF EXISTS todo")
+    destSqlite.exec("DROP TABLE IF EXISTS permission")
+    destSqlite.exec("DROP TABLE IF EXISTS session_share")
+    destSqlite.exec("DROP TABLE IF EXISTS workspace")
     destSqlite.exec("DROP TABLE IF EXISTS project")
+    destSqlite.exec("DROP TABLE IF EXISTS cron_job_state")
+    destSqlite.exec("DROP TABLE IF EXISTS cron_run")
     for (const [dir, newId] of globalProjectIdMap) {
       destSqlite
         .prepare("UPDATE project_recent SET project_id = ? WHERE project_id = 'global' AND directory = ?")
         .run(newId, dir)
     }
+    destSqlite.exec(stripProjectRecentFK)
+    destSqlite.exec(stripSessionPreferenceFK)
     destSqlite.exec("COMMIT")
     appendMigrationRecord(destSqlite, migrationMeta!)
     destSqlite.close()

@@ -1,4 +1,5 @@
 import { type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
+import { Database as BunDatabase } from "bun:sqlite"
 import { migrate } from "drizzle-orm/bun-sqlite/migrator"
 import { type SQLiteTransaction } from "drizzle-orm/sqlite-core"
 export * from "drizzle-orm"
@@ -14,6 +15,7 @@ import { Installation } from "../installation"
 import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
 import { init } from "#db"
+import { SplitMigration } from "./split-migration"
 
 declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -304,23 +306,22 @@ export namespace Database {
     db.run("PRAGMA busy_timeout = 5000")
     db.run("PRAGMA cache_size = -64000")
     db.run("PRAGMA foreign_keys = ON")
-    db.run("PRAGMA wal_checkpoint(PASSIVE)")
+    const sqlite = db.$client as BunDatabase
+    const needsBootstrap = !sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cron_job_state'")
+      .get()
+    if (needsBootstrap) {
+      log.info("bootstrapping cron database")
+      sqlite.exec(SplitMigration.cronTableSQL)
+      seedMigrationRecordsFromMain(sqlite)
+    }
     applyMigrations(db)
+    db.run("PRAGMA wal_checkpoint(PASSIVE)")
     return db
   })
 
   export function useCron<T>(callback: (trx: TxOrDb) => T): T {
-    try {
-      return callback(ctx.use().tx)
-    } catch (err) {
-      if (err instanceof Context.NotFound) {
-        const effects: (() => void | Promise<void>)[] = []
-        const result = ctx.provide({ effects, tx: CronClient() }, () => callback(CronClient()))
-        for (const effect of effects) effect()
-        return result
-      }
-      throw err
-    }
+    return callback(CronClient())
   }
 
   const projectClients = new Map<string, DrizzleClient>()
@@ -331,6 +332,28 @@ export namespace Database {
         ? OPENCODE_MIGRATIONS
         : migrations(path.join(import.meta.dirname, "../../migration"))
     if (entries.length > 0) migrate(db, entries)
+  }
+
+  function seedMigrationRecordsFromMain(sqlite: BunDatabase) {
+    const mainClient = Client().$client as BunDatabase
+    const rows = mainClient.prepare("SELECT hash, created_at, name FROM __drizzle_migrations").all() as {
+      hash: string
+      created_at: number
+      name: string
+    }[]
+    sqlite.exec(`CREATE TABLE IF NOT EXISTS __drizzle_migrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      name TEXT NOT NULL UNIQUE,
+      applied_at TEXT
+    )`)
+    const insert = sqlite.prepare(
+      "INSERT OR IGNORE INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)",
+    )
+    for (const row of rows) {
+      insert.run(row.hash, row.created_at, row.name, new Date().toISOString())
+    }
   }
 
   export function attach(projectId: string): DrizzleClient {
@@ -344,8 +367,15 @@ export namespace Database {
     db.run("PRAGMA busy_timeout = 5000")
     db.run("PRAGMA cache_size = -64000")
     db.run("PRAGMA foreign_keys = ON")
-    db.run("PRAGMA wal_checkpoint(PASSIVE)")
+    const sqlite = db.$client as BunDatabase
+    const needsBootstrap = !sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project'").get()
+    if (needsBootstrap) {
+      log.info("bootstrapping project database", { projectId })
+      for (const sql of SplitMigration.projectDbSchema) sqlite.exec(sql)
+      seedMigrationRecordsFromMain(sqlite)
+    }
     applyMigrations(db)
+    db.run("PRAGMA wal_checkpoint(PASSIVE)")
     projectClients.set(projectId, db)
     return db
   }
@@ -364,17 +394,8 @@ export namespace Database {
 
   export function useProject<T>(projectId: string, callback: (trx: TxOrDb) => T): T {
     const client = projectClient(projectId)
-    try {
-      return callback(ctx.use().tx)
-    } catch (err) {
-      if (err instanceof Context.NotFound) {
-        const effects: (() => void | Promise<void>)[] = []
-        const result = ctx.provide({ effects, tx: client }, () => callback(client))
-        for (const effect of effects) effect()
-        return result
-      }
-      throw err
-    }
+    const result = callback(client)
+    return result
   }
 
   export function transactionProject<T>(
@@ -385,22 +406,7 @@ export namespace Database {
     },
   ): NotPromise<T> {
     const client = projectClient(projectId)
-    try {
-      return callback(ctx.use().tx)
-    } catch (err) {
-      if (err instanceof Context.NotFound) {
-        const effects: (() => void | Promise<void>)[] = []
-        const result = client.transaction(
-          (tx: TxOrDb) => {
-            return ctx.provide({ tx, effects }, () => callback(tx))
-          },
-          { behavior: options?.behavior },
-        )
-        for (const effect of effects) effect()
-        return result as NotPromise<T>
-      }
-      throw err
-    }
+    return client.transaction(callback, { behavior: options?.behavior }) as NotPromise<T>
   }
 
   export type TxOrDb = Transaction | Client
@@ -412,11 +418,17 @@ export namespace Database {
 
   export function use<T>(callback: (trx: TxOrDb) => T): T {
     try {
-      return callback(ctx.use().tx)
+      const store = ctx.use()
+      return callback(store.tx)
     } catch (err) {
       if (err instanceof Context.NotFound) {
         const effects: (() => void | Promise<void>)[] = []
-        const result = ctx.provide({ effects, tx: Client() }, () => callback(Client()))
+        let result: T
+        try {
+          result = ctx.provide({ effects, tx: Client() }, () => callback(Client()))
+        } catch (e) {
+          throw e
+        }
         for (const effect of effects) effect()
         return result
       }
