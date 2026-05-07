@@ -314,6 +314,7 @@ export namespace Database {
       log.info("bootstrapping cron database")
       sqlite.exec(SplitMigration.cronTableSQL)
       seedMigrationRecordsFromMain(sqlite)
+      SplitMigration.seedMissingMigrationRecords(sqlite)
     }
     applyMigrations(db)
     db.run("PRAGMA wal_checkpoint(PASSIVE)")
@@ -373,6 +374,7 @@ export namespace Database {
       log.info("bootstrapping project database", { projectId })
       for (const sql of SplitMigration.projectDbSchema) sqlite.exec(sql)
       seedMigrationRecordsFromMain(sqlite)
+      SplitMigration.seedMissingMigrationRecords(sqlite)
     }
     applyMigrations(db)
     db.run("PRAGMA wal_checkpoint(PASSIVE)")

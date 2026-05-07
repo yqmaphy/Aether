@@ -292,7 +292,7 @@ export namespace SplitMigration {
       .run(extra.hash, extra.millis, extra.name, new Date().toISOString())
   }
 
-  function seedMissingMigrationRecords(sqlite: BunDatabase) {
+  export function seedMissingMigrationRecords(sqlite: BunDatabase) {
     const migrationDir = path.join(import.meta.dirname, "../../migration")
     if (!existsSync(migrationDir)) return
     const dirs = readdirSync(migrationDir, { withFileTypes: true })
@@ -635,11 +635,13 @@ export namespace SplitMigration {
       const pPath = projectDbPath(projectId)
       const pSqlite = new BunDatabase(pPath)
       seedMigrationRecords(pSqlite, srcSqlite, migrationMeta!)
+      seedMissingMigrationRecords(pSqlite)
       pSqlite.close()
     }
     const cPath = cronDbPath()
     const cSqlite2 = new BunDatabase(cPath)
     seedMigrationRecords(cSqlite2, srcSqlite, migrationMeta!)
+    seedMissingMigrationRecords(cSqlite2)
     cSqlite2.close()
 
     const cSqlite = initDb(cronDbPath(), [cronTableSQL])
