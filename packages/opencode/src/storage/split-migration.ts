@@ -228,16 +228,36 @@ export namespace SplitMigration {
     ALTER TABLE __new_session_preference RENAME TO session_preference;
   `
 
+  function backupDir() {
+    const dir = path.join(Global.Path.data, "backup")
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    return dir
+  }
+
+  function backupDbPath(main: string) {
+    const name = path.basename(main)
+    return path.join(backupDir(), `${name}.pre-split`)
+  }
+
   export function run(): { projects: number; sessions: number } {
     const main = mainDbPath()
-    const backup = main + ".pre-split"
+    const backup = backupDbPath(main)
     log.info("starting per-project database split", { main, backup })
 
-    // WAL checkpoint before copying to ensure backup has complete data
+    // Backup WAL/SHM BEFORE checkpoint (checkpoint deletes these files)
+    const companions = ["-shm", "-wal"]
+    for (const ext of companions) {
+      const srcPath = main + ext
+      const dstPath = backup + ext
+      if (existsSync(srcPath)) copyFileSync(srcPath, dstPath)
+    }
+
+    // WAL checkpoint flushes WAL data into main db file, then deletes WAL/SHM
     const checkpointDb = new BunDatabase(main)
     checkpointDb.exec("PRAGMA wal_checkpoint(TRUNCATE)")
     checkpointDb.close()
 
+    // After checkpoint, .db file contains all data; WAL/SHM are gone
     copyFileSync(main, backup)
     log.info("backed up main db", { from: main, to: backup })
 
