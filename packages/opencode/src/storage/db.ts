@@ -525,10 +525,36 @@ export namespace Database {
         for (const ext of ["-shm", "-wal"]) {
           if (existsSync(oldPath + ext)) renameSync(oldPath + ext, newPath + ext)
         }
+      } else if (!existsSync(oldPath) && existsSync(newPath)) {
+        // already rehashed in a prior run, but old 16-char file may have been
+        // re-created by stale serve process — delete it if found
+      }
+
+      // delete stale 16-char db file if it still exists (e.g. recreated by old serve)
+      if (existsSync(oldPath) && oldId.length === 16) {
+        unlinkSync(oldPath)
+        for (const ext of ["-shm", "-wal"]) {
+          if (existsSync(oldPath + ext)) unlinkSync(oldPath + ext)
+        }
+        log.info("deleted stale 16-char project db", { oldId })
       }
 
       sqlite.prepare("UPDATE global_project_map SET project_id = ? WHERE directory = ?").run(newId, row.directory)
       sqlite.prepare("UPDATE project_recent SET project_id = ? WHERE project_id = ?").run(newId, oldId)
+
+      // ensure project_recent has an entry for this directory
+      const dirNorm = norm(row.directory)
+      const recentKey = `dir:${dirNorm}`
+      const hasRecent = sqlite.prepare("SELECT 1 FROM project_recent WHERE key = ?").get(recentKey)
+      if (!hasRecent) {
+        const now = Date.now()
+        sqlite
+          .prepare(
+            "INSERT OR IGNORE INTO project_recent (key, kind, project_id, directory, activity_at, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(recentKey, "directory", newId, row.directory, now, now, now)
+        log.info("inserted missing project_recent entry", { directory: row.directory, newId })
+      }
 
       log.info("rehashed non-git project ID", { directory: row.directory, oldId, newId })
     }
