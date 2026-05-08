@@ -9,6 +9,7 @@ import { Log } from "../util/log"
 import { NamedError } from "@opencode-ai/util/error"
 import z from "zod"
 import path from "path"
+import { createHash } from "crypto"
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "fs"
 import { Installation } from "../installation"
 import { Flag } from "../flag/flag"
@@ -256,7 +257,8 @@ export namespace Database {
       db.run("PRAGMA foreign_keys = ON")
       db.run("PRAGMA wal_checkpoint(PASSIVE)")
 
-      // Apply schema migrations
+      const isNewDb = seedSplitMigration(db)
+
       const entries =
         typeof OPENCODE_MIGRATIONS !== "undefined"
           ? OPENCODE_MIGRATIONS
@@ -273,6 +275,8 @@ export namespace Database {
         }
         migrate(db, entries)
       }
+
+      if (isNewDb) postSplitFixupMain(db)
 
       return db
     })
@@ -306,6 +310,7 @@ export namespace Database {
     db.run("PRAGMA busy_timeout = 5000")
     db.run("PRAGMA cache_size = -64000")
     db.run("PRAGMA foreign_keys = ON")
+    seedSplitMigration(db)
     applyMigrations(db)
     db.run("PRAGMA wal_checkpoint(PASSIVE)")
     return db
@@ -315,7 +320,85 @@ export namespace Database {
     return callback(CronClient())
   }
 
+  const SPLIT_MIGRATION_NAME = "20260507071748_per_project_db_split"
+
   const projectClients = new Map<string, DrizzleClient>()
+
+  function splitMigrationEntry() {
+    const entries =
+      typeof OPENCODE_MIGRATIONS !== "undefined"
+        ? OPENCODE_MIGRATIONS
+        : migrations(path.join(import.meta.dirname, "../../migration"))
+    const entry = entries.find((e) => e.name === SPLIT_MIGRATION_NAME)
+    if (!entry) return undefined
+    const hash = createHash("sha256").update(entry.sql).digest("hex")
+    return { hash, millis: entry.timestamp, name: entry.name }
+  }
+
+  function seedSplitMigration(db: DrizzleClient): boolean {
+    const sqlite = db.$client
+    sqlite.exec(`CREATE TABLE IF NOT EXISTS __drizzle_migrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      hash text NOT NULL,
+      created_at numeric,
+      name text,
+      applied_at TEXT
+    )`)
+    const existing = sqlite.prepare("SELECT 1 FROM __drizzle_migrations WHERE name = ?").get(SPLIT_MIGRATION_NAME)
+    if (existing) return false
+    const meta = splitMigrationEntry()
+    if (!meta) return false
+    sqlite
+      .prepare("INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)")
+      .run(meta.hash, meta.millis, meta.name, new Date().toISOString())
+    log.info("seeded split migration record for new db")
+    return true
+  }
+
+  function postSplitFixupMain(db: DrizzleClient) {
+    const sqlite = db.$client
+    sqlite.exec(`CREATE TABLE IF NOT EXISTS global_project_map (
+      directory text PRIMARY KEY,
+      project_id text NOT NULL,
+      time_created integer NOT NULL,
+      time_updated integer NOT NULL
+    )`)
+    const hasProjectRecent = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_recent'")
+      .get()
+    if (hasProjectRecent) {
+      const fks = sqlite.prepare("PRAGMA foreign_key_list(project_recent)").all() as {
+        table: string
+        from: string
+      }[]
+      const hasProjectFK = fks.some((fk) => fk.table === "project" && fk.from === "project_id")
+      if (hasProjectFK) {
+        sqlite.exec("PRAGMA foreign_keys = OFF")
+        sqlite.exec(`
+          CREATE TABLE __new_project_recent (
+            key text PRIMARY KEY,
+            kind text NOT NULL,
+            project_id text,
+            directory text NOT NULL,
+            name text,
+            icon_url text,
+            icon_color text,
+            icon_override text,
+            activity_at integer NOT NULL,
+            time_created integer NOT NULL,
+            time_updated integer NOT NULL
+          );
+          INSERT INTO __new_project_recent(key, kind, project_id, directory, name, icon_url, icon_color, icon_override, activity_at, time_created, time_updated)
+            SELECT key, kind, project_id, directory, name, icon_url, icon_color, icon_override, activity_at, time_created, time_updated FROM project_recent;
+          DROP TABLE project_recent;
+          ALTER TABLE __new_project_recent RENAME TO project_recent;
+          CREATE INDEX IF NOT EXISTS project_recent_activity_idx ON project_recent (activity_at);
+        `)
+        sqlite.exec("PRAGMA foreign_keys = ON")
+        log.info("stripped project_recent FK in main db")
+      }
+    }
+  }
 
   function applyMigrations(db: Client) {
     const entries =
@@ -336,6 +419,7 @@ export namespace Database {
     db.run("PRAGMA busy_timeout = 5000")
     db.run("PRAGMA cache_size = -64000")
     db.run("PRAGMA foreign_keys = ON")
+    seedSplitMigration(db)
     applyMigrations(db)
     db.run("PRAGMA wal_checkpoint(PASSIVE)")
     projectClients.set(projectId, db)
