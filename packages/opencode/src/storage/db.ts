@@ -1,5 +1,4 @@
 import { type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
-import { Database as BunDatabase } from "bun:sqlite"
 import { migrate } from "drizzle-orm/bun-sqlite/migrator"
 import { type SQLiteTransaction } from "drizzle-orm/sqlite-core"
 export * from "drizzle-orm"
@@ -15,7 +14,6 @@ import { Installation } from "../installation"
 import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
 import { init } from "#db"
-import { SplitMigration } from "./split-migration"
 
 declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -306,15 +304,6 @@ export namespace Database {
     db.run("PRAGMA busy_timeout = 5000")
     db.run("PRAGMA cache_size = -64000")
     db.run("PRAGMA foreign_keys = ON")
-    const sqlite = db.$client as BunDatabase
-    const needsBootstrap = !sqlite
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cron_job_state'")
-      .get()
-    if (needsBootstrap) {
-      log.info("bootstrapping cron database")
-      sqlite.exec(SplitMigration.cronTableSQL)
-      seedMigrationRecordsFromMain(sqlite)
-    }
     applyMigrations(db)
     db.run("PRAGMA wal_checkpoint(PASSIVE)")
     return db
@@ -334,31 +323,6 @@ export namespace Database {
     if (entries.length > 0) migrate(db, entries)
   }
 
-  function seedMigrationRecordsFromMain(sqlite: BunDatabase) {
-    const mainClient = Client().$client as BunDatabase
-    const rows = mainClient
-      .prepare("SELECT hash, created_at, name, applied_at FROM __drizzle_migrations ORDER BY id")
-      .all() as {
-      hash: string
-      created_at: number
-      name: string
-      applied_at: string | null
-    }[]
-    sqlite.exec(`CREATE TABLE IF NOT EXISTS __drizzle_migrations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      hash text NOT NULL,
-      created_at numeric,
-      name text,
-      applied_at TEXT
-    )`)
-    const insert = sqlite.prepare(
-      "INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)",
-    )
-    for (const row of rows) {
-      insert.run(row.hash, row.created_at, row.name, row.applied_at ?? new Date().toISOString())
-    }
-  }
-
   export function attach(projectId: string): DrizzleClient {
     const existing = projectClients.get(projectId)
     if (existing) return existing
@@ -370,13 +334,6 @@ export namespace Database {
     db.run("PRAGMA busy_timeout = 5000")
     db.run("PRAGMA cache_size = -64000")
     db.run("PRAGMA foreign_keys = ON")
-    const sqlite = db.$client as BunDatabase
-    const needsBootstrap = !sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project'").get()
-    if (needsBootstrap) {
-      log.info("bootstrapping project database", { projectId })
-      for (const sql of SplitMigration.projectDbSchema) sqlite.exec(sql)
-      seedMigrationRecordsFromMain(sqlite)
-    }
     applyMigrations(db)
     db.run("PRAGMA wal_checkpoint(PASSIVE)")
     projectClients.set(projectId, db)

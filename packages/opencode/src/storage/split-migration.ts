@@ -1,4 +1,5 @@
 import { Database as BunDatabase } from "bun:sqlite"
+import { migrate } from "drizzle-orm/bun-sqlite/migrator"
 import { Global } from "../global"
 import { Log } from "../util/log"
 import { Hash } from "../util/hash"
@@ -7,6 +8,7 @@ import { createHash } from "crypto"
 import { existsSync, mkdirSync, readdirSync, copyFileSync, readFileSync } from "fs"
 import { Installation } from "../installation"
 import { Flag } from "../flag/flag"
+import { init } from "#db"
 
 declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -84,7 +86,7 @@ export namespace SplitMigration {
     return path.resolve(input).replace(/\\/g, "/").toLowerCase()
   }
 
-  function initDb(filePath: string, sql: string[]) {
+  function initDb(filePath: string) {
     mkdirSync(path.dirname(filePath), { recursive: true })
     const sqlite = new BunDatabase(filePath)
     sqlite.exec("PRAGMA journal_mode = WAL")
@@ -92,174 +94,41 @@ export namespace SplitMigration {
     sqlite.exec("PRAGMA busy_timeout = 5000")
     sqlite.exec("PRAGMA cache_size = -64000")
     sqlite.exec("PRAGMA foreign_keys = OFF")
-    for (const s of sql) sqlite.exec(s)
     return sqlite
   }
 
-  const projectTableSQL = `
-    CREATE TABLE IF NOT EXISTS project (
-      id TEXT PRIMARY KEY,
-      worktree TEXT NOT NULL,
-      vcs TEXT,
-      name TEXT,
-      icon_url TEXT,
-      icon_color TEXT,
-      time_created INTEGER NOT NULL,
-      time_updated INTEGER NOT NULL,
-      time_initialized INTEGER,
-      sandboxes TEXT NOT NULL,
-      commands TEXT
-    );
-  `
+  function getMigrationEntries(): { sql: string; timestamp: number; name: string }[] {
+    if (typeof OPENCODE_MIGRATIONS !== "undefined") return OPENCODE_MIGRATIONS
+    const dir = path.join(import.meta.dirname, "../../migration")
+    if (!existsSync(dir)) return []
+    const dirs = readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+    const result = dirs.map((name) => {
+      const file = path.join(dir, name, "migration.sql")
+      if (!existsSync(file)) return undefined
+      return {
+        sql: readFileSync(file, "utf-8"),
+        timestamp: (() => {
+          const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(name)
+          if (!match) return 0
+          return Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6])
+        })(),
+        name,
+      }
+    }) as ({ sql: string; timestamp: number; name: string } | undefined)[]
+    return result
+      .filter((x): x is { sql: string; timestamp: number; name: string } => x !== undefined)
+      .sort((a, b) => a.timestamp - b.timestamp)
+  }
 
-  const sessionTableSQL = `
-    CREATE TABLE IF NOT EXISTS session (
-      id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL,
-      workspace_id TEXT,
-      parent_id TEXT,
-      tree_id TEXT,
-      fork_index INTEGER,
-      fork_parent_session_id TEXT,
-      fork_after_user_message_id TEXT,
-      slug TEXT NOT NULL,
-      directory TEXT NOT NULL,
-      title TEXT NOT NULL,
-      version TEXT NOT NULL,
-      share_url TEXT,
-      summary_additions INTEGER,
-      summary_deletions INTEGER,
-      summary_files INTEGER,
-      summary_diffs TEXT,
-      revert TEXT,
-      permission TEXT,
-      reading_mode TEXT,
-      time_created INTEGER NOT NULL,
-      time_updated INTEGER NOT NULL,
-      time_compacting INTEGER,
-      time_archived INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS session_project_idx ON session(project_id);
-    CREATE INDEX IF NOT EXISTS session_workspace_idx ON session(workspace_id);
-    CREATE INDEX IF NOT EXISTS session_parent_idx ON session(parent_id);
-    CREATE INDEX IF NOT EXISTS session_tree_idx ON session(tree_id);
-    CREATE INDEX IF NOT EXISTS session_fork_parent_idx ON session(fork_parent_session_id);
-    CREATE INDEX IF NOT EXISTS session_fork_after_user_message_idx ON session(fork_after_user_message_id);
-  `
-
-  const messageTableSQL = `
-    CREATE TABLE IF NOT EXISTS message (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      time_created INTEGER NOT NULL,
-      time_updated INTEGER NOT NULL,
-      data TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS message_session_time_created_id_idx ON message(session_id, time_created, id);
-  `
-
-  const partTableSQL = `
-    CREATE TABLE IF NOT EXISTS part (
-      id TEXT PRIMARY KEY,
-      message_id TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      time_created INTEGER NOT NULL,
-      time_updated INTEGER NOT NULL,
-      data TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS part_message_id_id_idx ON part(message_id, id);
-    CREATE INDEX IF NOT EXISTS part_session_idx ON part(session_id);
-  `
-
-  const todoTableSQL = `
-    CREATE TABLE IF NOT EXISTS todo (
-      session_id TEXT NOT NULL,
-      content TEXT NOT NULL,
-      status TEXT NOT NULL,
-      priority TEXT NOT NULL,
-      position INTEGER NOT NULL,
-      time_created INTEGER NOT NULL,
-      time_updated INTEGER NOT NULL,
-      PRIMARY KEY (session_id, position)
-    );
-    CREATE INDEX IF NOT EXISTS todo_session_idx ON todo(session_id);
-  `
-
-  const permissionTableSQL = `
-    CREATE TABLE IF NOT EXISTS permission (
-      project_id TEXT PRIMARY KEY,
-      time_created INTEGER NOT NULL,
-      time_updated INTEGER NOT NULL,
-      data TEXT NOT NULL
-    );
-  `
-
-  const sessionShareTableSQL = `
-    CREATE TABLE IF NOT EXISTS session_share (
-      session_id TEXT PRIMARY KEY,
-      id TEXT NOT NULL,
-      secret TEXT NOT NULL,
-      url TEXT NOT NULL,
-      time_created INTEGER NOT NULL,
-      time_updated INTEGER NOT NULL
-    );
-  `
-
-  const sessionPreferenceTableSQL = `
-    CREATE TABLE IF NOT EXISTS session_preference (
-      session_id text PRIMARY KEY,
-      agent text,
-      model_provider_id text,
-      model_id text,
-      variant text,
-      auto_accept integer,
-      time_created integer NOT NULL,
-      time_updated integer NOT NULL
-    );
-  `
-
-  const workspaceTableSQL = `
-    CREATE TABLE IF NOT EXISTS workspace (
-      id TEXT PRIMARY KEY,
-      type TEXT NOT NULL,
-      branch TEXT,
-      name TEXT,
-      directory TEXT,
-      extra TEXT,
-      project_id TEXT NOT NULL
-    );
-  `
-
-  export const cronTableSQL = `
-    CREATE TABLE IF NOT EXISTS cron_job_state (
-      job_id TEXT PRIMARY KEY,
-      enabled INTEGER NOT NULL,
-      next_run_at INTEGER,
-      last_run_at INTEGER,
-      last_status TEXT,
-      running INTEGER NOT NULL DEFAULT 0,
-      start_at INTEGER,
-      definition_snapshot TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS cron_job_state_next_run_idx ON cron_job_state(next_run_at);
-
-    CREATE TABLE IF NOT EXISTS cron_run (
-      run_id TEXT PRIMARY KEY,
-      job_id TEXT NOT NULL,
-      started_at INTEGER NOT NULL,
-      finished_at INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      output_summary TEXT,
-      mode TEXT NOT NULL,
-      project_id TEXT,
-      session_id TEXT,
-      created_session_id TEXT,
-      payload_snapshot TEXT NOT NULL,
-      trigger_reason TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS cron_run_job_started_idx ON cron_run(job_id, started_at);
-  `
+  function applyMigrations(filePath: string) {
+    const entries = getMigrationEntries()
+    if (entries.length > 0) {
+      const db = init(filePath)
+      migrate(db, entries)
+    }
+  }
 
   const globalProjectMapSQL = `
     CREATE TABLE IF NOT EXISTS global_project_map (
@@ -270,11 +139,11 @@ export namespace SplitMigration {
     );
   `
 
-  function seedMigrationRecords(
-    sqlite: BunDatabase,
-    srcSqlite: BunDatabase,
-    extra: { hash: string; millis: number; name: string },
-  ) {
+  // For project/cron dbs: only seed the split migration record.
+  // Drizzle migrate() will create tables and apply all other migrations.
+  // The split migration must be marked as applied because its SQL
+  // (DROP TABLE + CREATE global_project_map) should not run on project/cron dbs.
+  function seedSplitMigrationOnly(sqlite: BunDatabase, extra: { hash: string; millis: number; name: string }) {
     sqlite.exec(`CREATE TABLE IF NOT EXISTS __drizzle_migrations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       hash text NOT NULL,
@@ -282,21 +151,9 @@ export namespace SplitMigration {
       name text,
       applied_at TEXT
     )`)
-    const rows = srcSqlite
-      .prepare("SELECT hash, created_at, name, applied_at FROM __drizzle_migrations ORDER BY id")
-      .all() as {
-      hash: string
-      created_at: number
-      name: string
-      applied_at: string | null
-    }[]
-    const insert = sqlite.prepare(
-      "INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)",
-    )
-    for (const row of rows) insert.run(row.hash, row.created_at, row.name, row.applied_at ?? new Date().toISOString())
-    insert.run(extra.hash, extra.millis, extra.name, new Date().toISOString())
-
-    seedMigrationsFromDir(sqlite)
+    sqlite
+      .prepare("INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)")
+      .run(extra.hash, extra.millis, extra.name, new Date().toISOString())
   }
 
   function seedMigrationsFromDir(sqlite: BunDatabase) {
@@ -371,18 +228,6 @@ export namespace SplitMigration {
     ALTER TABLE __new_session_preference RENAME TO session_preference;
   `
 
-  export const projectDbSchema = [
-    projectTableSQL,
-    sessionTableSQL,
-    messageTableSQL,
-    partTableSQL,
-    todoTableSQL,
-    permissionTableSQL,
-    sessionShareTableSQL,
-    sessionPreferenceTableSQL,
-    workspaceTableSQL,
-  ]
-
   export function run(): { projects: number; sessions: number } {
     const main = mainDbPath()
     const backup = main + ".pre-split"
@@ -407,9 +252,20 @@ export namespace SplitMigration {
     const permissions = srcSqlite.prepare("SELECT * FROM permission").all() as any[]
     const shares = srcSqlite.prepare("SELECT * FROM session_share").all() as any[]
     const workspaces = srcSqlite.prepare("SELECT * FROM workspace").all() as any[]
-    const cronJobs = srcSqlite.prepare("SELECT * FROM cron_job_state").all() as any[]
-    const cronRuns = srcSqlite.prepare("SELECT * FROM cron_run").all() as any[]
-    const preferences = srcSqlite.prepare("SELECT * FROM session_preference").all() as any[]
+    const cronJobs = (() => {
+      const has = srcSqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cron_job_state'").get()
+      return has ? (srcSqlite.prepare("SELECT * FROM cron_job_state").all() as any[]) : []
+    })()
+    const cronRuns = (() => {
+      const has = srcSqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cron_run'").get()
+      return has ? (srcSqlite.prepare("SELECT * FROM cron_run").all() as any[]) : []
+    })()
+    const preferences = (() => {
+      const has = srcSqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_preference'")
+        .get()
+      return has ? (srcSqlite.prepare("SELECT * FROM session_preference").all() as any[]) : []
+    })()
 
     const sessionByProject = new Map<string, any[]>()
     const globalSessionDirs = new Map<string, any[]>()
@@ -513,12 +369,25 @@ export namespace SplitMigration {
     const allProjectIds = [...sessionByProject.keys(), ...projectById.keys()]
     const uniqueProjectIds = new Set(allProjectIds)
 
+    const migrationMeta = (() => {
+      const migrationDir = path.join(import.meta.dirname, "../../migration/20260507071748_per_project_db_split")
+      const sqlFile = path.join(migrationDir, "migration.sql")
+      if (!existsSync(sqlFile)) return undefined
+      const sql = readFileSync(sqlFile, "utf-8")
+      const hash = createHash("sha256").update(sql).digest("hex")
+      const name = "20260507071748_per_project_db_split"
+      const millis = Date.UTC(2026, 4, 7, 7, 17, 48)
+      return { hash, name, millis }
+    })()
+
     let projectCount = 0
     let sessionCount = 0
 
     for (const projectId of uniqueProjectIds) {
       const pPath = projectDbPath(projectId)
-      const pSqlite = initDb(pPath, projectDbSchema)
+      const pSqlite = initDb(pPath)
+      seedSplitMigrationOnly(pSqlite, migrationMeta!)
+      applyMigrations(pPath)
       pSqlite.exec("BEGIN TRANSACTION")
 
       const projectRow = projectById.get(projectId)
@@ -615,21 +484,38 @@ export namespace SplitMigration {
         }
 
         const sps = prefsBySession.get(s.id) ?? []
-        for (const sp of sps) {
-          pSqlite
-            .prepare(
-              "INSERT OR IGNORE INTO session_preference (session_id, agent, model_provider_id, model_id, variant, auto_accept, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .run(
-              sp.session_id,
-              sp.agent ?? null,
-              sp.model_provider_id ?? null,
-              sp.model_id ?? null,
-              sp.variant ?? null,
-              sp.auto_accept ?? null,
-              sp.time_created,
-              sp.time_updated,
-            )
+        if (sps.length > 0) {
+          const hasPref = pSqlite
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_preference'")
+            .get()
+          if (!hasPref) {
+            pSqlite.exec(`CREATE TABLE IF NOT EXISTS session_preference (
+              session_id text PRIMARY KEY,
+              agent text,
+              model_provider_id text,
+              model_id text,
+              variant text,
+              auto_accept integer,
+              time_created integer NOT NULL,
+              time_updated integer NOT NULL
+            )`)
+          }
+          for (const sp of sps) {
+            pSqlite
+              .prepare(
+                "INSERT OR IGNORE INTO session_preference (session_id, agent, model_provider_id, model_id, variant, auto_accept, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              )
+              .run(
+                sp.session_id,
+                sp.agent ?? null,
+                sp.model_provider_id ?? null,
+                sp.model_id ?? null,
+                sp.variant ?? null,
+                sp.auto_accept ?? null,
+                sp.time_created,
+                sp.time_updated,
+              )
+          }
         }
       }
 
@@ -670,31 +556,10 @@ export namespace SplitMigration {
 
     log.info("created project databases", { count: projectCount })
 
-    const migrationMeta = (() => {
-      const migrationDir = path.join(import.meta.dirname, "../../migration/20260507071748_per_project_db_split")
-      const sqlFile = path.join(migrationDir, "migration.sql")
-      if (!existsSync(sqlFile)) return undefined
-      const sql = readFileSync(sqlFile, "utf-8")
-      const hash = createHash("sha256").update(sql).digest("hex")
-      const name = "20260507071748_per_project_db_split"
-      const millis = Date.UTC(2026, 4, 7, 7, 17, 48)
-      return { hash, name, millis }
-    })()
-
-    // Mark the per-project-db-split migration as already applied on all new dbs
-    // so that Drizzle's migrate() skips it when attach/CronClient call applyMigrations
-    for (const projectId of uniqueProjectIds) {
-      const pPath = projectDbPath(projectId)
-      const pSqlite = new BunDatabase(pPath)
-      seedMigrationRecords(pSqlite, srcSqlite, migrationMeta!)
-      pSqlite.close()
-    }
-    const cPath = cronDbPath()
-    const cSqlite2 = new BunDatabase(cPath)
-    seedMigrationRecords(cSqlite2, srcSqlite, migrationMeta!)
-    cSqlite2.close()
-
-    const cSqlite = initDb(cronDbPath(), [cronTableSQL])
+    // Seed and migrate cron db
+    const cSqlite = initDb(cronDbPath())
+    seedSplitMigrationOnly(cSqlite, migrationMeta!)
+    applyMigrations(cronDbPath())
     cSqlite.exec("BEGIN TRANSACTION")
     for (const cj of cronJobs) {
       cSqlite

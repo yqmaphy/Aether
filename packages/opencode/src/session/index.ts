@@ -1917,27 +1917,24 @@ export namespace Session {
     }
 
     try {
-      before[source.path] = tableStats(source.client)
+      const dataClient = source.current ? Database.projectClient(Instance.project.id) : source.client
+      before[source.path] = tableStats(dataClient)
       const rows =
         scope === "current_project"
           ? source.current
-            ? source.client
+            ? dataClient
                 .select()
                 .from(SessionTable)
                 .where(eq(SessionTable.project_id, Instance.project.id))
                 .orderBy(asc(SessionTable.time_created), asc(SessionTable.id))
                 .all()
             : []
-          : source.client
-              .select()
-              .from(SessionTable)
-              .orderBy(asc(SessionTable.time_created), asc(SessionTable.id))
-              .all()
+          : dataClient.select().from(SessionTable).orderBy(asc(SessionTable.time_created), asc(SessionTable.id)).all()
 
       const sessions = rows.map(fromRow).filter((session) => !isSubagentSession(session))
       const all = new Map(sessions.map((session) => [session.id, session] as const))
       const turns = new Map<SessionID, SourceTurn[]>()
-      for (const session of sessions) turns.set(session.id, sourceTurns(loadHistory(source.client, session.id)))
+      for (const session of sessions) turns.set(session.id, sourceTurns(loadHistory(dataClient, session.id)))
 
       const result: BackfillTurn[] = []
       const marks: BackfillTurnMark[] = []
@@ -2055,7 +2052,7 @@ export namespace Session {
 
       for (const session of sessions) materialize(session)
 
-      after[source.path] = tableStats(source.client)
+      after[source.path] = tableStats(source.current ? Database.projectClient(Instance.project.id) : source.client!)
       return {
         databases: [
           { path: source.path, current: source.current, status: "reachable", session_count: sessions.length },
@@ -2080,7 +2077,7 @@ export namespace Session {
       const reason = error instanceof Error ? error.message : String(error)
       const stats = (() => {
         try {
-          return tableStats(source.client)
+          return tableStats(source.current ? Database.projectClient(Instance.project.id) : source.client!)
         } catch {
           return undefined
         }
