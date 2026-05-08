@@ -279,8 +279,10 @@ export namespace Database {
   })
 
   export function close() {
-    Client().$client.close()
-    Client.reset()
+    if (Client.isLoaded()) {
+      Client().$client.close()
+      Client.reset()
+    }
     for (const [, client] of projectClients) {
       client.$client.close()
     }
