@@ -305,7 +305,7 @@ export namespace SplitMigration {
     }
 
     for (const [dir, dirSessions] of globalSessionDirs) {
-      const newId = Hash.fast(dir).slice(0, 16)
+      const newId = Hash.fast(dir).slice(0, 32)
       globalProjectIdMap.set(dir, newId)
       for (const s of dirSessions) {
         s.project_id = newId

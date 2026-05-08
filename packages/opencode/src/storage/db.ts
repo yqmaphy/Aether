@@ -10,7 +10,8 @@ import { NamedError } from "@opencode-ai/util/error"
 import z from "zod"
 import path from "path"
 import { createHash } from "crypto"
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync } from "fs"
+import { Database as BunSqlite } from "bun:sqlite"
 import { Installation } from "../installation"
 import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
@@ -278,6 +279,9 @@ export namespace Database {
 
       if (isNewDb) postSplitFixupMain(db)
 
+      rehashProjectIds(db)
+      cleanupEmptyProjects(db)
+
       return db
     })
   })
@@ -491,6 +495,118 @@ export namespace Database {
   }
 
   type NotPromise<T> = T extends Promise<any> ? never : T
+
+  export function rehashProjectIds(db: DrizzleClient) {
+    const sqlite = db.$client
+    const rows = sqlite.prepare("SELECT directory, project_id FROM global_project_map").all() as {
+      directory: string
+      project_id: string
+    }[]
+    const toRehash = rows.filter((r) => r.project_id.length === 16)
+    if (toRehash.length === 0) return
+
+    const chDir = channelDir()
+    for (const row of toRehash) {
+      const oldId = row.project_id
+      const newId = createHash("sha1").update(row.directory).digest("hex").slice(0, 32)
+
+      const oldPath = path.join(chDir, `aether-${oldId}.db`)
+      const newPath = path.join(chDir, `aether-${newId}.db`)
+      if (existsSync(oldPath) && !existsSync(newPath)) {
+        const pDb = new BunSqlite(oldPath)
+        pDb.prepare("UPDATE project SET id = ? WHERE id = ?").run(newId, oldId)
+        pDb.prepare("UPDATE session SET project_id = ? WHERE project_id = ?").run(newId, oldId)
+        pDb.prepare("UPDATE workspace SET project_id = ? WHERE project_id = ?").run(newId, oldId)
+        pDb.prepare("UPDATE permission SET project_id = ? WHERE project_id = ?").run(newId, oldId)
+        pDb.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+        pDb.close()
+
+        renameSync(oldPath, newPath)
+        for (const ext of ["-shm", "-wal"]) {
+          if (existsSync(oldPath + ext)) renameSync(oldPath + ext, newPath + ext)
+        }
+      }
+
+      sqlite.prepare("UPDATE global_project_map SET project_id = ? WHERE directory = ?").run(newId, row.directory)
+      sqlite.prepare("UPDATE project_recent SET project_id = ? WHERE project_id = ?").run(newId, oldId)
+
+      log.info("rehashed non-git project ID", { directory: row.directory, oldId, newId })
+    }
+
+    sqlite.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+    log.info("rehashed non-git project IDs to 32-char", { count: toRehash.length })
+  }
+
+  export function cleanupEmptyProjects(db: DrizzleClient) {
+    const sqlite = db.$client
+    const chDir = channelDir()
+    if (!existsSync(chDir)) return
+
+    const pattern = /^aether-([0-9a-f]+)\.db$/
+    const files = readdirSync(chDir, { withFileTypes: true }).filter((e) => e.isFile() && pattern.test(e.name))
+
+    const dirsWithSessions = new Set<string>()
+    const emptyIds: string[] = []
+    for (const entry of files) {
+      const match = pattern.exec(entry.name)
+      if (!match) continue
+      const pid = match[1]
+      if (projectClients.has(pid)) continue
+      const pPath = path.join(chDir, entry.name)
+      const pDb = new BunSqlite(pPath, { readonly: true })
+      const cnt = (pDb.prepare("SELECT count(*) as cnt FROM session").get() as any).cnt
+      if (cnt > 0) {
+        const projRow = pDb.prepare("SELECT worktree FROM project WHERE id = ?").get(pid) as any
+        if (projRow?.worktree) dirsWithSessions.add(norm(projRow.worktree))
+        const sessRows = pDb.prepare("SELECT directory FROM session").all() as any[]
+        for (const s of sessRows) {
+          if (s.directory) dirsWithSessions.add(norm(s.directory))
+        }
+      } else {
+        emptyIds.push(pid)
+      }
+      pDb.close()
+    }
+
+    for (const pid of emptyIds) {
+      const pPath = projectPath(pid)
+      unlinkSync(pPath)
+      for (const ext of ["-shm", "-wal"]) {
+        const companion = pPath + ext
+        if (existsSync(companion)) unlinkSync(companion)
+      }
+      log.info("deleted empty project db", { projectId: pid })
+    }
+
+    if (emptyIds.length > 0) {
+      sqlite
+        .prepare("DELETE FROM project_recent WHERE project_id IN (" + emptyIds.map(() => "?").join(",") + ")")
+        .run(...emptyIds)
+      sqlite
+        .prepare("DELETE FROM global_project_map WHERE project_id IN (" + emptyIds.map(() => "?").join(",") + ")")
+        .run(...emptyIds)
+    }
+
+    const nullRows = sqlite.prepare("SELECT key, directory FROM project_recent WHERE project_id IS NULL").all() as {
+      key: string
+      directory: string
+    }[]
+    const staleKeys: string[] = []
+    for (const row of nullRows) {
+      if (row.directory && !dirsWithSessions.has(norm(row.directory))) {
+        staleKeys.push(row.key)
+      }
+    }
+    if (staleKeys.length > 0) {
+      sqlite
+        .prepare("DELETE FROM project_recent WHERE key IN (" + staleKeys.map(() => "?").join(",") + ")")
+        .run(...staleKeys)
+    }
+
+    const totalDeleted = emptyIds.length + staleKeys.length
+    if (totalDeleted > 0)
+      log.info("cleaned up empty projects", { emptyProjectDbs: emptyIds.length, staleRecentEntries: staleKeys.length })
+  }
 
   export function transaction<T>(
     callback: (tx: TxOrDb) => NotPromise<T>,
