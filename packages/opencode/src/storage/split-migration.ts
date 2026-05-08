@@ -5,7 +5,7 @@ import { Log } from "../util/log"
 import { Hash } from "../util/hash"
 import path from "path"
 import { createHash } from "crypto"
-import { existsSync, mkdirSync, readdirSync, copyFileSync, readFileSync } from "fs"
+import { existsSync, mkdirSync, readdirSync, copyFileSync, readFileSync, unlinkSync } from "fs"
 import { Installation } from "../installation"
 import { Flag } from "../flag/flag"
 import { init } from "#db"
@@ -576,6 +576,31 @@ export namespace SplitMigration {
 
     log.info("created project databases", { count: projectCount })
 
+    // Delete empty project dbs (no session data)
+    const dirsWithSessions = new Set<string>()
+    const emptyProjectIds: string[] = []
+    for (const projectId of uniqueProjectIds) {
+      const projSessions = sessionByProject.get(projectId) ?? []
+      if (projSessions.length > 0) {
+        for (const s of projSessions) {
+          if (s.directory) dirsWithSessions.add(norm(s.directory))
+        }
+      } else {
+        const pPath = projectDbPath(projectId)
+        const pSqlite = new BunDatabase(pPath)
+        const cnt = pSqlite.prepare("SELECT count(*) as cnt FROM session").get() as { cnt: number }
+        pSqlite.close()
+        if (cnt.cnt === 0) {
+          unlinkSync(pPath)
+          for (const ext of ["-shm", "-wal"]) {
+            if (existsSync(pPath + ext)) unlinkSync(pPath + ext)
+          }
+          emptyProjectIds.push(projectId)
+          log.info("deleted empty project db", { projectId })
+        }
+      }
+    }
+
     // Seed and migrate cron db
     const cSqlite = initDb(cronDbPath())
     seedSplitMigrationOnly(cSqlite, migrationMeta!)
@@ -641,6 +666,25 @@ export namespace SplitMigration {
         .run(newId, dir)
     }
     destSqlite.exec(stripProjectRecentFK)
+    // Delete project_recent entries with null project_id (pre-split residuals)
+    destSqlite.exec("DELETE FROM project_recent WHERE project_id IS NULL")
+    // Delete project_recent entries whose directory has no session in any project db
+    const recentRows = destSqlite.prepare("SELECT key, directory FROM project_recent").all() as {
+      key: string
+      directory: string
+    }[]
+    const staleKeys: string[] = []
+    for (const row of recentRows) {
+      if (row.directory && !dirsWithSessions.has(norm(row.directory))) {
+        staleKeys.push(row.key)
+      }
+    }
+    if (staleKeys.length > 0) {
+      destSqlite
+        .prepare(`DELETE FROM project_recent WHERE key IN (${staleKeys.map(() => "?").join(",")})`)
+        .run(...staleKeys)
+      log.info("deleted stale project_recent entries", { count: staleKeys.length })
+    }
     const hasSessionPref = destSqlite
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_preference'")
       .get()
@@ -671,30 +715,5 @@ export namespace SplitMigration {
 
     log.info("split migration complete", { projects: projectCount, sessions: sessionCount })
     return { projects: projectCount, sessions: sessionCount }
-  }
-
-  export function cleanupProjectRecent() {
-    const main = mainDbPath()
-    if (main === ":memory:" || !existsSync(main)) return
-    const sqlite = new BunDatabase(main)
-    sqlite.exec("PRAGMA foreign_keys = OFF")
-    sqlite.exec("DELETE FROM project_recent WHERE project_id IS NULL")
-    const rows = sqlite.prepare("SELECT project_id FROM project_recent WHERE project_id IS NOT NULL").all() as {
-      project_id: string
-    }[]
-    const dir = channelDir()
-    const missing: string[] = []
-    for (const row of rows) {
-      const pPath = path.join(dir, `aether-${row.project_id}.db`)
-      if (!existsSync(pPath)) missing.push(row.project_id)
-    }
-    if (missing.length > 0) {
-      sqlite
-        .prepare(`DELETE FROM project_recent WHERE project_id IN (${missing.map(() => "?").join(",")})`)
-        .run(...missing)
-    }
-    sqlite.exec("PRAGMA wal_checkpoint(TRUNCATE)")
-    sqlite.close()
-    log.info("cleaned up project_recent", { missingProjectIds: missing.length })
   }
 }
