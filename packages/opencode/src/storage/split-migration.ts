@@ -1,5 +1,4 @@
 import { Database as BunDatabase } from "bun:sqlite"
-import { drizzle } from "drizzle-orm/bun-sqlite"
 import { Global } from "../global"
 import { Log } from "../util/log"
 import { Hash } from "../util/hash"
@@ -54,11 +53,15 @@ export namespace SplitMigration {
     if (main === ":memory:") return false
     if (!existsSync(main)) return false
     const sqlite = new BunDatabase(main)
+    sqlite.exec("PRAGMA wal_checkpoint(TRUNCATE)")
     try {
       const hasProjectTable = sqlite
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project'")
         .get()
-      if (!hasProjectTable) return false
+      if (!hasProjectTable) {
+        sqlite.close()
+        return false
+      }
       const hasSessions = sqlite.prepare("SELECT count(*) as cnt FROM session").get() as { cnt: number } | null
       if (!hasSessions || hasSessions.cnt === 0) {
         sqlite.close()
@@ -202,6 +205,19 @@ export namespace SplitMigration {
     );
   `
 
+  const sessionPreferenceTableSQL = `
+    CREATE TABLE IF NOT EXISTS session_preference (
+      session_id text PRIMARY KEY,
+      agent text,
+      model_provider_id text,
+      model_id text,
+      variant text,
+      auto_accept integer,
+      time_created integer NOT NULL,
+      time_updated integer NOT NULL
+    );
+  `
+
   const workspaceTableSQL = `
     CREATE TABLE IF NOT EXISTS workspace (
       id TEXT PRIMARY KEY,
@@ -261,22 +277,50 @@ export namespace SplitMigration {
   ) {
     sqlite.exec(`CREATE TABLE IF NOT EXISTS __drizzle_migrations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      hash TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      name TEXT NOT NULL UNIQUE,
+      hash text NOT NULL,
+      created_at numeric,
+      name text,
       applied_at TEXT
     )`)
-    const rows = srcSqlite.prepare("SELECT hash, created_at, name, applied_at FROM __drizzle_migrations").all() as {
+    const rows = srcSqlite
+      .prepare("SELECT hash, created_at, name, applied_at FROM __drizzle_migrations ORDER BY id")
+      .all() as {
       hash: string
       created_at: number
       name: string
       applied_at: string | null
     }[]
     const insert = sqlite.prepare(
-      "INSERT OR IGNORE INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)",
     )
     for (const row of rows) insert.run(row.hash, row.created_at, row.name, row.applied_at ?? new Date().toISOString())
     insert.run(extra.hash, extra.millis, extra.name, new Date().toISOString())
+
+    seedMigrationsFromDir(sqlite)
+  }
+
+  function seedMigrationsFromDir(sqlite: BunDatabase) {
+    const existingNames = new Set(
+      (sqlite.prepare("SELECT name FROM __drizzle_migrations").all() as { name: string }[]).map((r) => r.name),
+    )
+    const migrationDir = path.join(import.meta.dirname, "../../migration")
+    if (!existsSync(migrationDir)) return
+    const dirs = readdirSync(migrationDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+    const insert = sqlite.prepare(
+      "INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)",
+    )
+    for (const dirName of dirs) {
+      if (existingNames.has(dirName)) continue
+      const sqlFile = path.join(migrationDir, dirName, "migration.sql")
+      if (!existsSync(sqlFile)) continue
+      const sql = readFileSync(sqlFile, "utf-8")
+      const hash = createHash("sha256").update(sql).digest("hex")
+      const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(dirName)
+      const millis = match ? Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]) : 0
+      insert.run(hash, millis, dirName, new Date().toISOString())
+    }
   }
 
   function appendMigrationRecord(sqlite: BunDatabase, extra: { hash: string; millis: number; name: string }) {
@@ -290,29 +334,6 @@ export namespace SplitMigration {
     sqlite
       .prepare("INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)")
       .run(extra.hash, extra.millis, extra.name, new Date().toISOString())
-  }
-
-  export function seedMissingMigrationRecords(sqlite: BunDatabase) {
-    const migrationDir = path.join(import.meta.dirname, "../../migration")
-    if (!existsSync(migrationDir)) return
-    const dirs = readdirSync(migrationDir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-    const existing = new Set(
-      (sqlite.prepare("SELECT name FROM __drizzle_migrations").all() as { name: string }[]).map((r) => r.name),
-    )
-    for (const dirName of dirs) {
-      if (existing.has(dirName)) continue
-      const sqlFile = path.join(migrationDir, dirName, "migration.sql")
-      if (!existsSync(sqlFile)) continue
-      const sql = readFileSync(sqlFile, "utf-8")
-      const hash = createHash("sha256").update(sql).digest("hex")
-      const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(dirName)
-      const millis = match ? Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]) : 0
-      sqlite
-        .prepare("INSERT OR IGNORE INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)")
-        .run(hash, millis, dirName, new Date().toISOString())
-    }
   }
 
   const stripProjectRecentFK = `
@@ -358,6 +379,7 @@ export namespace SplitMigration {
     todoTableSQL,
     permissionTableSQL,
     sessionShareTableSQL,
+    sessionPreferenceTableSQL,
     workspaceTableSQL,
   ]
 
@@ -366,11 +388,15 @@ export namespace SplitMigration {
     const backup = main + ".pre-split"
     log.info("starting per-project database split", { main, backup })
 
+    // WAL checkpoint before copying to ensure backup has complete data
+    const checkpointDb = new BunDatabase(main)
+    checkpointDb.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+    checkpointDb.close()
+
     copyFileSync(main, backup)
     log.info("backed up main db", { from: main, to: backup })
 
     const srcSqlite = new BunDatabase(backup)
-    const src = drizzle({ client: srcSqlite })
     srcSqlite.exec("PRAGMA foreign_keys = OFF")
 
     const projects = srcSqlite.prepare("SELECT * FROM project").all() as any[]
@@ -383,6 +409,7 @@ export namespace SplitMigration {
     const workspaces = srcSqlite.prepare("SELECT * FROM workspace").all() as any[]
     const cronJobs = srcSqlite.prepare("SELECT * FROM cron_job_state").all() as any[]
     const cronRuns = srcSqlite.prepare("SELECT * FROM cron_run").all() as any[]
+    const preferences = srcSqlite.prepare("SELECT * FROM session_preference").all() as any[]
 
     const sessionByProject = new Map<string, any[]>()
     const globalSessionDirs = new Map<string, any[]>()
@@ -443,6 +470,13 @@ export namespace SplitMigration {
       sharesBySession.set(sh.session_id, bucket)
     }
 
+    const prefsBySession = new Map<string, any[]>()
+    for (const sp of preferences) {
+      const bucket = prefsBySession.get(sp.session_id) ?? []
+      bucket.push(sp)
+      prefsBySession.set(sp.session_id, bucket)
+    }
+
     const workspaceByProject = new Map<string, any[]>()
     for (const w of workspaces) {
       const pid = globalProjectIdMap.get(norm(w.project_id)) ?? w.project_id
@@ -453,6 +487,7 @@ export namespace SplitMigration {
 
     const projectById = new Map<string, any>()
     for (const p of projects) {
+      if (p.id === "global") continue
       const pid = globalProjectIdMap.get(norm(p.id)) ?? p.id
       projectById.set(pid, { ...p, id: pid })
     }
@@ -484,7 +519,6 @@ export namespace SplitMigration {
     for (const projectId of uniqueProjectIds) {
       const pPath = projectDbPath(projectId)
       const pSqlite = initDb(pPath, projectDbSchema)
-      const pDb = drizzle({ client: pSqlite })
       pSqlite.exec("BEGIN TRANSACTION")
 
       const projectRow = projectById.get(projectId)
@@ -579,6 +613,24 @@ export namespace SplitMigration {
             )
             .run(sh.session_id, sh.id, sh.secret, sh.url, sh.time_created, sh.time_updated)
         }
+
+        const sps = prefsBySession.get(s.id) ?? []
+        for (const sp of sps) {
+          pSqlite
+            .prepare(
+              "INSERT OR IGNORE INTO session_preference (session_id, agent, model_provider_id, model_id, variant, auto_accept, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              sp.session_id,
+              sp.agent ?? null,
+              sp.model_provider_id ?? null,
+              sp.model_id ?? null,
+              sp.variant ?? null,
+              sp.auto_accept ?? null,
+              sp.time_created,
+              sp.time_updated,
+            )
+        }
       }
 
       const permRow = permissions.find((p) => {
@@ -635,13 +687,11 @@ export namespace SplitMigration {
       const pPath = projectDbPath(projectId)
       const pSqlite = new BunDatabase(pPath)
       seedMigrationRecords(pSqlite, srcSqlite, migrationMeta!)
-      seedMissingMigrationRecords(pSqlite)
       pSqlite.close()
     }
     const cPath = cronDbPath()
     const cSqlite2 = new BunDatabase(cPath)
     seedMigrationRecords(cSqlite2, srcSqlite, migrationMeta!)
-    seedMissingMigrationRecords(cSqlite2)
     cSqlite2.close()
 
     const cSqlite = initDb(cronDbPath(), [cronTableSQL])
@@ -689,6 +739,7 @@ export namespace SplitMigration {
 
     const destSqlite = new BunDatabase(main)
     destSqlite.exec("PRAGMA foreign_keys = OFF")
+    destSqlite.exec("PRAGMA wal_checkpoint(TRUNCATE)")
     destSqlite.exec("BEGIN TRANSACTION")
     destSqlite.exec(globalProjectMapSQL)
     for (const [dir, newId] of globalProjectIdMap) {
@@ -698,26 +749,35 @@ export namespace SplitMigration {
         )
         .run(dir, newId, Date.now(), Date.now())
     }
-    destSqlite.exec("DROP TABLE IF EXISTS session")
-    destSqlite.exec("DROP TABLE IF EXISTS message")
-    destSqlite.exec("DROP TABLE IF EXISTS part")
-    destSqlite.exec("DROP TABLE IF EXISTS todo")
-    destSqlite.exec("DROP TABLE IF EXISTS permission")
-    destSqlite.exec("DROP TABLE IF EXISTS session_share")
-    destSqlite.exec("DROP TABLE IF EXISTS workspace")
-    destSqlite.exec("DROP TABLE IF EXISTS project")
-    destSqlite.exec("DROP TABLE IF EXISTS cron_job_state")
-    destSqlite.exec("DROP TABLE IF EXISTS cron_run")
+    // Strip FKs BEFORE dropping tables (strip needs the source table to exist)
     for (const [dir, newId] of globalProjectIdMap) {
       destSqlite
         .prepare("UPDATE project_recent SET project_id = ? WHERE project_id = 'global' AND directory = ?")
         .run(newId, dir)
     }
     destSqlite.exec(stripProjectRecentFK)
-    destSqlite.exec(stripSessionPreferenceFK)
+    const hasSessionPref = destSqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_preference'")
+      .get()
+    if (hasSessionPref) {
+      destSqlite.exec(stripSessionPreferenceFK)
+    }
+    // Now drop tables that moved to per-project/cron dbs
+    destSqlite.exec("DROP TABLE IF EXISTS session")
+    destSqlite.exec("DROP TABLE IF EXISTS message")
+    destSqlite.exec("DROP TABLE IF EXISTS part")
+    destSqlite.exec("DROP TABLE IF EXISTS todo")
+    destSqlite.exec("DROP TABLE IF EXISTS permission")
+    destSqlite.exec("DROP TABLE IF EXISTS session_share")
+    destSqlite.exec("DROP TABLE IF EXISTS session_preference")
+    destSqlite.exec("DROP TABLE IF EXISTS workspace")
+    destSqlite.exec("DROP TABLE IF EXISTS project")
+    destSqlite.exec("DROP TABLE IF EXISTS cron_job_state")
+    destSqlite.exec("DROP TABLE IF EXISTS cron_run")
     destSqlite.exec("COMMIT")
-    seedMigrationRecords(destSqlite, srcSqlite, migrationMeta!)
-    seedMissingMigrationRecords(destSqlite)
+    appendMigrationRecord(destSqlite, migrationMeta!)
+    seedMigrationsFromDir(destSqlite)
+    destSqlite.exec("PRAGMA wal_checkpoint(TRUNCATE)")
     destSqlite.close()
 
     srcSqlite.close()

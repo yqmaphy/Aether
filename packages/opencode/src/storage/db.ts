@@ -258,8 +258,6 @@ export namespace Database {
       db.run("PRAGMA foreign_keys = ON")
       db.run("PRAGMA wal_checkpoint(PASSIVE)")
 
-      SplitMigration.seedMissingMigrationRecords(db.$client as BunDatabase)
-
       // Apply schema migrations
       const entries =
         typeof OPENCODE_MIGRATIONS !== "undefined"
@@ -317,7 +315,6 @@ export namespace Database {
       sqlite.exec(SplitMigration.cronTableSQL)
       seedMigrationRecordsFromMain(sqlite)
     }
-    SplitMigration.seedMissingMigrationRecords(sqlite)
     applyMigrations(db)
     db.run("PRAGMA wal_checkpoint(PASSIVE)")
     return db
@@ -339,23 +336,26 @@ export namespace Database {
 
   function seedMigrationRecordsFromMain(sqlite: BunDatabase) {
     const mainClient = Client().$client as BunDatabase
-    const rows = mainClient.prepare("SELECT hash, created_at, name FROM __drizzle_migrations").all() as {
+    const rows = mainClient
+      .prepare("SELECT hash, created_at, name, applied_at FROM __drizzle_migrations ORDER BY id")
+      .all() as {
       hash: string
       created_at: number
       name: string
+      applied_at: string | null
     }[]
     sqlite.exec(`CREATE TABLE IF NOT EXISTS __drizzle_migrations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      hash TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      name TEXT NOT NULL UNIQUE,
+      hash text NOT NULL,
+      created_at numeric,
+      name text,
       applied_at TEXT
     )`)
     const insert = sqlite.prepare(
-      "INSERT OR IGNORE INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO __drizzle_migrations (hash, created_at, name, applied_at) VALUES (?, ?, ?, ?)",
     )
     for (const row of rows) {
-      insert.run(row.hash, row.created_at, row.name, new Date().toISOString())
+      insert.run(row.hash, row.created_at, row.name, row.applied_at ?? new Date().toISOString())
     }
   }
 
@@ -377,7 +377,6 @@ export namespace Database {
       for (const sql of SplitMigration.projectDbSchema) sqlite.exec(sql)
       seedMigrationRecordsFromMain(sqlite)
     }
-    SplitMigration.seedMissingMigrationRecords(sqlite)
     applyMigrations(db)
     db.run("PRAGMA wal_checkpoint(PASSIVE)")
     projectClients.set(projectId, db)
