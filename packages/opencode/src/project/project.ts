@@ -578,7 +578,8 @@ export namespace Project {
         }
 
         yield* emitUpdated(result)
-        yield* touch({ project: result, directory })
+        const touchDir = data.worktree !== "/" ? data.worktree : directory
+        yield* touch({ project: result, directory: touchDir })
         return { project: result, sandbox: data.sandbox }
       })
 
