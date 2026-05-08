@@ -96,6 +96,7 @@ let cli = yargs(hideBin(process.argv))
         const result = SplitMigration.run()
         process.stderr.write(`Split complete: ${result.projects} projects, ${result.sessions} sessions migrated.` + EOL)
       }
+      SplitMigration.cleanupProjectRecent()
     }
 
     if (!seeded) {

@@ -663,11 +663,38 @@ export namespace SplitMigration {
     appendMigrationRecord(destSqlite, migrationMeta!)
     seedMigrationsFromDir(destSqlite)
     destSqlite.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+    destSqlite.exec("VACUUM")
+    destSqlite.exec("PRAGMA wal_checkpoint(TRUNCATE)")
     destSqlite.close()
 
     srcSqlite.close()
 
     log.info("split migration complete", { projects: projectCount, sessions: sessionCount })
     return { projects: projectCount, sessions: sessionCount }
+  }
+
+  export function cleanupProjectRecent() {
+    const main = mainDbPath()
+    if (main === ":memory:" || !existsSync(main)) return
+    const sqlite = new BunDatabase(main)
+    sqlite.exec("PRAGMA foreign_keys = OFF")
+    sqlite.exec("DELETE FROM project_recent WHERE project_id IS NULL")
+    const rows = sqlite.prepare("SELECT project_id FROM project_recent WHERE project_id IS NOT NULL").all() as {
+      project_id: string
+    }[]
+    const dir = channelDir()
+    const missing: string[] = []
+    for (const row of rows) {
+      const pPath = path.join(dir, `aether-${row.project_id}.db`)
+      if (!existsSync(pPath)) missing.push(row.project_id)
+    }
+    if (missing.length > 0) {
+      sqlite
+        .prepare(`DELETE FROM project_recent WHERE project_id IN (${missing.map(() => "?").join(",")})`)
+        .run(...missing)
+    }
+    sqlite.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+    sqlite.close()
+    log.info("cleaned up project_recent", { missingProjectIds: missing.length })
   }
 }
