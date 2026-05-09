@@ -64,10 +64,10 @@ function track(directory: string, next: Promise<Shape>) {
 }
 
 export const Instance = {
-  async provide<R>(input: { directory: string; init?: () => Promise<any>; fn: () => R }): Promise<R> {
+  async provide<R>(input: { directory: string; init?: () => Promise<any>; fn: () => R; create?: boolean }): Promise<R> {
     const directory = Filesystem.resolve(input.directory)
     let existing = cache.get(directory)
-    if (!existing) {
+    if (!existing && input.create !== false) {
       Log.Default.info("creating instance", { directory })
       existing = track(
         directory,
@@ -77,10 +77,25 @@ export const Instance = {
         }),
       )
     }
+    if (!existing) {
+      const fallback = Instance.fallback()
+      if (!fallback) throw new Error(`no instance for ${directory} and no fallback available`)
+      return context.provide(await fallback, async () => {
+        return input.fn()
+      })
+    }
     const ctx = await existing
     return context.provide(ctx, async () => {
       return input.fn()
     })
+  },
+  fallback() {
+    const entries = [...cache.values()]
+    if (entries.length === 0) return undefined
+    return entries[0]
+  },
+  has(directory: string) {
+    return cache.has(Filesystem.resolve(directory))
   },
   get current() {
     return context.use()

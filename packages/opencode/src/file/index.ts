@@ -640,12 +640,13 @@ export namespace File {
     readonly init: () => Effect.Effect<void>
     readonly status: () => Effect.Effect<File.Info[]>
     readonly read: (file: string) => Effect.Effect<File.Content>
-    readonly list: (dir?: string) => Effect.Effect<File.Node[]>
+    readonly list: (dir?: string, baseDir?: string) => Effect.Effect<File.Node[]>
     readonly search: (input: {
       query: string
       limit?: number
       dirs?: boolean
       type?: "file" | "directory"
+      baseDir?: string
     }) => Effect.Effect<string[]>
   }
 
@@ -912,11 +913,12 @@ export namespace File {
         })
       })
 
-      const list = Effect.fn("File.list")(function* (dir?: string) {
+      const list = Effect.fn("File.list")(function* (dir?: string, baseDir?: string) {
         return yield* Effect.promise(async () => {
+          const root = baseDir ?? Instance.directory
           const exclude = [".git", ".DS_Store"]
           let ignored = (_: string) => false
-          if (Instance.project.vcs === "git") {
+          if (!baseDir && Instance.project.vcs === "git") {
             const ig = ignore()
             const gitignore = path.join(Instance.project.worktree, ".gitignore")
             if (await Filesystem.exists(gitignore)) {
@@ -929,8 +931,8 @@ export namespace File {
             ignored = ig.ignores.bind(ig)
           }
 
-          const resolved = dir ? path.join(Instance.directory, dir) : Instance.directory
-          if (!Instance.containsPath(resolved)) {
+          const resolved = dir ? path.join(root, dir) : root
+          if (!baseDir && !Instance.containsPath(resolved)) {
             throw new Error("Access denied: path escapes project directory")
           }
 
@@ -938,7 +940,7 @@ export namespace File {
           for (const entry of await fs.promises.readdir(resolved, { withFileTypes: true }).catch(() => [])) {
             if (exclude.includes(entry.name)) continue
             const absolute = path.join(resolved, entry.name)
-            const file = path.relative(Instance.directory, absolute)
+            const file = path.relative(root, absolute)
 
             let type: "file" | "directory"
             let symlinkTarget: string | undefined
@@ -978,7 +980,38 @@ export namespace File {
         limit?: number
         dirs?: boolean
         type?: "file" | "directory"
+        baseDir?: string
       }) {
+        if (input.baseDir && input.baseDir !== Instance.directory) {
+          const base = input.baseDir!
+          return yield* Effect.promise(async () => {
+            const items: string[] = []
+            const maxDepth = 3
+            for await (const file of Ripgrep.files({ cwd: base, maxDepth, hidden: true })) {
+              const full = path.resolve(base, file)
+              const rel = path.relative(base, full)
+              const stat = await fs.promises.stat(full).catch(() => undefined)
+              if (!stat) continue
+              const isDir = stat.isDirectory()
+              if (input.type === "directory" && !isDir) continue
+              if (input.type === "file" && isDir) continue
+              items.push(isDir ? rel + "/" : rel)
+            }
+            if (!input.query) return items.slice(0, input.limit ?? 100)
+            const matched = fuzzysort
+              .go(
+                input.query.trim().replaceAll("\\", "/"),
+                items.map((item) => ({ item, path: item.replaceAll("\\", "/") })),
+                {
+                  limit: input.limit ?? 50,
+                  key: "path",
+                },
+              )
+              .map((r) => r.obj.item)
+            return matched
+          })
+        }
+
         yield* ensure()
         const { cache } = yield* InstanceState.get(state)
 
@@ -1033,11 +1066,17 @@ export namespace File {
     return runPromise((svc) => svc.read(file))
   }
 
-  export async function list(dir?: string) {
-    return runPromise((svc) => svc.list(dir))
+  export async function list(dir?: string, baseDir?: string) {
+    return runPromise((svc) => svc.list(dir, baseDir))
   }
 
-  export async function search(input: { query: string; limit?: number; dirs?: boolean; type?: "file" | "directory" }) {
+  export async function search(input: {
+    query: string
+    limit?: number
+    dirs?: boolean
+    type?: "file" | "directory"
+    baseDir?: string
+  }) {
     return runPromise((svc) => svc.search(input))
   }
 }

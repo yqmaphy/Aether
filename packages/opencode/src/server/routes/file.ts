@@ -277,16 +277,18 @@ export const FileRoutes = lazy(() =>
         const type = c.req.valid("query").type
         const limit = c.req.valid("query").limit
 
+        const rawDir = (() => {
+          const v = c.req.query("directory") || ""
+          try {
+            return decodeURIComponent(v)
+          } catch {
+            return v
+          }
+        })()
+        const browseBaseDir = rawDir && rawDir !== Instance.directory ? rawDir : undefined
+
         // On Windows, return drive roots when browsing from "/"
         if (process.platform === "win32" && type === "directory") {
-          const rawDir = (() => {
-            const v = c.req.query("directory") || ""
-            try {
-              return decodeURIComponent(v)
-            } catch {
-              return v
-            }
-          })()
           if (rawDir === "/") {
             const { existsSync } = await import("fs")
             const drives: string[] = []
@@ -305,6 +307,7 @@ export const FileRoutes = lazy(() =>
           limit: limit ?? 10,
           dirs: dirs !== "false",
           type,
+          baseDir: browseBaseDir,
         })
         return c.json(results)
       },
@@ -396,7 +399,7 @@ export const FileRoutes = lazy(() =>
           return c.json(drives)
         }
 
-        const content = await File.list(path)
+        const content = await File.list(path, rawDir && rawDir !== Instance.directory ? rawDir : undefined)
         return c.json(content)
       },
     )
