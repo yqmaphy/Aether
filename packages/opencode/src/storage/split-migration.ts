@@ -666,8 +666,25 @@ export namespace SplitMigration {
         .run(newId, dir)
     }
     destSqlite.exec(stripProjectRecentFK)
-    // Delete project_recent entries with null project_id (pre-split residuals)
-    destSqlite.exec("DELETE FROM project_recent WHERE project_id IS NULL")
+    const nullRecentRows = destSqlite
+      .prepare("SELECT key, directory FROM project_recent WHERE project_id IS NULL")
+      .all() as { key: string; directory: string }[]
+    const stillNullKeys: string[] = []
+    for (const row of nullRecentRows) {
+      const dirNorm = norm(row.directory ?? "")
+      const newPid = globalProjectIdMap.get(dirNorm)
+      if (newPid) {
+        destSqlite.prepare("UPDATE project_recent SET project_id = ? WHERE key = ?").run(newPid, row.key)
+      } else {
+        stillNullKeys.push(row.key)
+      }
+    }
+    if (stillNullKeys.length > 0) {
+      destSqlite
+        .prepare(`DELETE FROM project_recent WHERE key IN (${stillNullKeys.map(() => "?").join(",")})`)
+        .run(...stillNullKeys)
+      log.info("deleted project_recent entries with unresolvable null project_id", { count: stillNullKeys.length })
+    }
     // Delete project_recent entries whose directory has no session in any project db
     const recentRows = destSqlite.prepare("SELECT key, directory FROM project_recent").all() as {
       key: string

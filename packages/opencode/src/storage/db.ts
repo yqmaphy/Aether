@@ -600,20 +600,24 @@ export namespace Database {
       key: string
       directory: string
     }[]
-    const staleKeys: string[] = []
+    const gpmLookup = new Map(
+      (
+        sqlite.prepare("SELECT directory, project_id FROM global_project_map").all() as {
+          directory: string
+          project_id: string
+        }[]
+      ).map((r) => [norm(r.directory), r.project_id]),
+    )
+    let patched = 0
     for (const row of nullRows) {
-      if (row.directory && !dirsWithSessions.has(norm(row.directory))) {
-        staleKeys.push(row.key)
+      const dirNorm = norm(row.directory ?? "")
+      const pid = gpmLookup.get(dirNorm)
+      if (pid) {
+        sqlite.prepare("UPDATE project_recent SET project_id = ? WHERE key = ?").run(pid, row.key)
+        patched++
       }
     }
-    if (staleKeys.length > 0) {
-      sqlite
-        .prepare("DELETE FROM project_recent WHERE key IN (" + staleKeys.map(() => "?").join(",") + ")")
-        .run(...staleKeys)
-    }
-
-    if (staleKeys.length > 0)
-      log.info("cleaned up stale project_recent entries", { staleRecentEntries: staleKeys.length })
+    if (patched > 0) log.info("patched null project_id in project_recent from global_project_map", { patched })
 
     const gpmRows = sqlite.prepare("SELECT directory, project_id FROM global_project_map").all() as {
       directory: string
