@@ -579,7 +579,9 @@ export namespace Database {
       const pid = match[1]
       if (projectClients.has(pid)) continue
       const pPath = path.join(chDir, entry.name)
-      const pDb = new BunSqlite(pPath, { readonly: true })
+      const pDb = new BunSqlite(pPath)
+      pDb.exec("PRAGMA journal_mode = WAL")
+      pDb.exec("PRAGMA foreign_keys = ON")
       const cnt = (pDb.prepare("SELECT count(*) as cnt FROM session").get() as any).cnt
       if (cnt > 0) {
         const projRow = pDb.prepare("SELECT worktree FROM project WHERE id = ?").get(pid) as any
@@ -591,6 +593,7 @@ export namespace Database {
       } else {
         emptyIds.push(pid)
       }
+      pDb.exec("PRAGMA wal_checkpoint(PASSIVE)")
       pDb.close()
     }
 

@@ -1282,17 +1282,14 @@ export namespace Session {
 
     const limit = input?.limit ?? 100
 
-    const effectiveChannel =
-      ["latest", "beta"].includes(Installation.CHANNEL) || Flag.OPENCODE_DISABLE_CHANNEL_DB
-        ? "latest"
-        : Installation.CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")
-    const prefix = `aether-${effectiveChannel}-`
+    const hexPattern = /^aether-([0-9a-f]+)\.db$/
 
     const allSessions: SessionRow[] = []
     for (const pPath of Database.projectPaths()) {
       const fileName = path.basename(pPath)
-      if (!fileName.startsWith(prefix) || !fileName.endsWith(".db")) continue
-      const pid = fileName.slice(prefix.length, fileName.length - ".db".length)
+      const match = hexPattern.exec(fileName)
+      if (!match) continue
+      const pid = match[1]
       const rows = Database.useProject(pid, (db) =>
         conditions.length > 0
           ? db
