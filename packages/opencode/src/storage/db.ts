@@ -572,7 +572,6 @@ export namespace Database {
     const files = readdirSync(chDir, { withFileTypes: true }).filter((e) => e.isFile() && pattern.test(e.name))
 
     const dirsWithSessions = new Set<string>()
-    const emptyIds: string[] = []
     for (const entry of files) {
       const match = pattern.exec(entry.name)
       if (!match) continue
@@ -590,33 +589,14 @@ export namespace Database {
         for (const s of sessRows) {
           if (s.directory) dirsWithSessions.add(norm(s.directory))
         }
-      } else {
-        emptyIds.push(pid)
       }
       pDb.exec("PRAGMA wal_checkpoint(PASSIVE)")
       pDb.close()
     }
 
-    for (const pid of emptyIds) {
-      const pPath = projectPath(pid)
-      unlinkSync(pPath)
-      for (const ext of ["-shm", "-wal"]) {
-        const companion = pPath + ext
-        if (existsSync(companion)) unlinkSync(companion)
-      }
-      log.info("deleted empty project db", { projectId: pid })
-    }
-
-    if (emptyIds.length > 0) {
-      sqlite
-        .prepare("DELETE FROM project_recent WHERE project_id IN (" + emptyIds.map(() => "?").join(",") + ")")
-        .run(...emptyIds)
-      sqlite
-        .prepare("DELETE FROM global_project_map WHERE project_id IN (" + emptyIds.map(() => "?").join(",") + ")")
-        .run(...emptyIds)
-    }
-
-    const nullRows = sqlite.prepare("SELECT key, directory FROM project_recent WHERE project_id IS NULL").all() as {
+    const nullRows = sqlite
+      .prepare("SELECT key, directory FROM project_recent WHERE project_id IS NULL")
+      .all() as unknown as {
       key: string
       directory: string
     }[]
@@ -632,9 +612,8 @@ export namespace Database {
         .run(...staleKeys)
     }
 
-    const totalDeleted = emptyIds.length + staleKeys.length
-    if (totalDeleted > 0)
-      log.info("cleaned up empty projects", { emptyProjectDbs: emptyIds.length, staleRecentEntries: staleKeys.length })
+    if (staleKeys.length > 0)
+      log.info("cleaned up stale project_recent entries", { staleRecentEntries: staleKeys.length })
   }
 
   export function transaction<T>(
