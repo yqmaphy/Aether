@@ -614,6 +614,28 @@ export namespace Database {
 
     if (staleKeys.length > 0)
       log.info("cleaned up stale project_recent entries", { staleRecentEntries: staleKeys.length })
+
+    const gpmRows = sqlite.prepare("SELECT directory, project_id FROM global_project_map").all() as {
+      directory: string
+      project_id: string
+    }[]
+    const existingKeys = new Set(
+      (sqlite.prepare("SELECT key FROM project_recent").all() as { key: string }[]).map((r) => r.key),
+    )
+    const now = Date.now()
+    let seeded = 0
+    for (const gpm of gpmRows) {
+      const dirNorm = norm(gpm.directory)
+      const key = `dir:${dirNorm}`
+      if (existingKeys.has(key)) continue
+      sqlite
+        .prepare(
+          "INSERT OR IGNORE INTO project_recent (key, kind, project_id, directory, activity_at, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(key, "directory", gpm.project_id, gpm.directory, now, now, now)
+      seeded++
+    }
+    if (seeded > 0) log.info("seeded missing project_recent entries from global_project_map", { seeded })
   }
 
   export function transaction<T>(
