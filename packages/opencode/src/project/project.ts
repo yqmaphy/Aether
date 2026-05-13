@@ -492,13 +492,14 @@ export namespace Project {
         if (Flag.OPENCODE_EXPERIMENTAL_ICON_DISCOVERY)
           yield* discover(existing).pipe(Effect.ignore, Effect.forkIn(scope))
 
+        const priorWorktree = existing.worktree
         const result: Info = {
           ...existing,
           worktree: data.worktree,
           vcs: data.vcs,
           time: { ...existing.time, updated: Date.now() },
         }
-        if (data.sandbox !== result.worktree && !result.sandboxes.includes(data.sandbox))
+        if (data.sandbox !== priorWorktree && !result.sandboxes.includes(data.sandbox))
           result.sandboxes.push(data.sandbox)
         result.sandboxes = yield* Effect.forEach(
           result.sandboxes,
