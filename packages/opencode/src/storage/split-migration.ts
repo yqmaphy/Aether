@@ -547,16 +547,29 @@ export namespace SplitMigration {
       }
 
       const resolveProject = (s: any) => {
-        const row = projectByOld.get(s.project_id)
-        // Always resolve from the session's own directory so ProjectIdentity
-        // walks up to find the real git root. Using the project's worktree
-        // was incorrect — it could be a subdirectory whose git root differs
-        // from other sessions in the same project.
-        const dir = s.directory || row?.worktree || "/"
+        // Non-global sessions preserve their existing project_id —
+        // the monolithic DB already has the correct project grouping.
+        // Only "global" sessions need ProjectIdentity to compute a new id.
+        if (s.project_id !== "global") {
+          const row = projectByOld.get(s.project_id)
+          oldProjectIdMap.set(s.project_id, s.project_id)
+          mergeProject(
+            s.project_id,
+            {
+              id: s.project_id,
+              root: row?.worktree ?? s.directory ?? "/",
+              sandbox: row?.worktree ?? s.directory ?? "/",
+              vcs: row?.vcs ?? undefined,
+            },
+            row,
+          )
+          alias(s.directory, s.project_id)
+          return s.project_id
+        }
+        const dir = s.directory || "/"
         const info = ProjectIdentity.resolve(dir)
         const pid = info.id
-        if (s.project_id !== "global") oldProjectIdMap.set(s.project_id, pid)
-        mergeProject(pid, info, row)
+        mergeProject(pid, info)
         alias(s.directory, pid)
         return pid
       }

@@ -384,6 +384,23 @@ export namespace Project {
         type DiscoveryResult = { id: ProjectID; worktree: string; sandbox: string; vcs: Info["vcs"] }
 
         const data: DiscoveryResult = yield* Effect.sync(() => {
+          // Check global_project_map first — if this directory (or its
+          // git root) already has a project_id mapping, use that instead
+          // of computing a new one. This preserves project_ids from the
+          // split migration and prevents re-splitting merged projects.
+          const dirNorm = Database.norm(directory)
+          const existingMapping = Database.use((d) =>
+            d.select().from(GlobalProjectMapTable).where(eq(GlobalProjectMapTable.directory, dirNorm)).get(),
+          )
+          if (existingMapping) {
+            const info = ProjectIdentity.resolve(directory)
+            return {
+              id: ProjectID.make(existingMapping.project_id),
+              worktree: info.root,
+              sandbox: info.sandbox,
+              vcs: info.vcs ?? fakeVcs,
+            }
+          }
           const info = ProjectIdentity.resolve(directory)
           return {
             id: info.id,
