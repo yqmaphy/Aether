@@ -8,12 +8,88 @@ import { existsSync, mkdirSync, readdirSync, copyFileSync, readFileSync, unlinkS
 import { Installation } from "../installation"
 import { Flag } from "../flag/flag"
 import { init } from "#db"
-import { ProjectIdentity } from "@/project/identity"
+import { ProjectID } from "@/project/schema"
 
 declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
 export namespace SplitMigration {
   const log = Log.create({ service: "split-migration" })
+
+  function resolveProjectId(dir: string): { id: string; root: string; sandbox: string; vcs?: "git" } {
+    let cur = path.resolve(dir)
+    while (true) {
+      if (existsSync(path.join(cur, ".git"))) {
+        const gitPath = path.join(cur, ".git")
+        const sandbox = cur
+
+        let commonDir = cur
+        try {
+          if (!statSync(gitPath).isDirectory()) {
+            const content = readFileSync(gitPath, "utf-8")
+            const match = /^gitdir:\s*(.+)\s*$/im.exec(content)
+            if (match) {
+              const gitdir = path.resolve(path.dirname(gitPath), match[1])
+              const idx = gitdir.replace(/\\/g, "/").lastIndexOf("/worktrees/")
+              if (idx >= 0) {
+                commonDir = path.dirname(gitdir.slice(0, idx))
+              }
+            }
+          }
+        } catch {}
+
+        const cachedPath = path.join(commonDir, ".git", "opencode")
+        try {
+          if (existsSync(cachedPath)) {
+            const cached = readFileSync(cachedPath, "utf-8").trim()
+            if (cached) {
+              const sandboxCachedPath = path.join(sandbox, ".git", "opencode")
+              try {
+                if (existsSync(sandboxCachedPath)) {
+                  const sandboxCached = readFileSync(sandboxCachedPath, "utf-8").trim()
+                  if (sandboxCached) return { id: sandboxCached, root: commonDir, sandbox, vcs: "git" }
+                }
+              } catch {}
+              return { id: cached, root: commonDir, sandbox, vcs: "git" }
+            }
+          }
+        } catch {}
+
+        try {
+          const proc = Bun.spawnSync(["git", "rev-list", "--max-parents=0", "HEAD"], {
+            cwd: sandbox,
+            stdout: "pipe",
+            stderr: "pipe",
+          })
+          if (proc.exitCode === 0 && proc.stdout) {
+            const roots = proc.stdout
+              .toString()
+              .split("\n")
+              .filter(Boolean)
+              .map((x) => x.trim())
+              .toSorted()
+            const id = roots[0]
+            if (id) {
+              const cacheTarget = statSync(gitPath).isDirectory()
+                ? path.join(gitPath, "opencode")
+                : path.join(commonDir, ".git", "opencode")
+              try {
+                writeFileSync(cacheTarget, id)
+              } catch {}
+              return { id, root: commonDir, sandbox, vcs: "git" }
+            }
+          }
+        } catch {}
+
+        return { id: ProjectID.fromDirectory(norm(commonDir)), root: commonDir, sandbox, vcs: "git" }
+      }
+      const parent = path.dirname(cur)
+      if (parent === cur) break
+      cur = parent
+    }
+
+    const root = path.resolve(dir)
+    return { id: ProjectID.fromDirectory(norm(root)), root, sandbox: root }
+  }
 
   function channel() {
     const ch = Installation.CHANNEL
@@ -524,7 +600,9 @@ export namespace SplitMigration {
         directoryProjectMap.set(key, pid)
       }
 
-      const mergeProject = (pid: string, info: ProjectIdentity.Info, row?: any) => {
+      type ResolveInfo = { id: string; root: string; sandbox: string; vcs?: "git" }
+
+      const mergeProject = (pid: string, info: ResolveInfo, row?: any) => {
         const prev = projectById.get(pid)
         const sandboxes = new Set<string>(json(prev?.sandboxes))
         for (const item of json(row?.sandboxes)) sandboxes.add(item)
@@ -547,30 +625,12 @@ export namespace SplitMigration {
       }
 
       const resolveProject = (s: any) => {
-        // Non-global sessions preserve their existing project_id —
-        // the monolithic DB already has the correct project grouping.
-        // Only "global" sessions need ProjectIdentity to compute a new id.
-        if (s.project_id !== "global") {
-          const row = projectByOld.get(s.project_id)
-          oldProjectIdMap.set(s.project_id, s.project_id)
-          mergeProject(
-            s.project_id,
-            {
-              id: s.project_id,
-              root: row?.worktree ?? s.directory ?? "/",
-              sandbox: row?.worktree ?? s.directory ?? "/",
-              vcs: row?.vcs ?? undefined,
-            },
-            row,
-          )
-          alias(s.directory, s.project_id)
-          return s.project_id
-        }
         const dir = s.directory || "/"
-        const info = ProjectIdentity.resolve(dir)
-        const pid = info.id
-        mergeProject(pid, info)
-        alias(s.directory, pid)
+        const resolved = resolveProjectId(dir)
+        const pid = resolved.id
+        oldProjectIdMap.set(s.project_id, pid)
+        mergeProject(pid, resolved, projectByOld.get(s.project_id))
+        alias(dir, pid)
         return pid
       }
 
