@@ -545,11 +545,8 @@ export namespace Database {
       .get()
     if (!hasTable) return
 
-    const existingCount = (pSqlite.prepare("SELECT count(*) as cnt FROM directory_meta").get() as { cnt: number }).cnt
-    if (existingCount > 0) return
-
-    const projectRow = pSqlite.prepare("SELECT worktree, vcs FROM project WHERE id = ?").get(pid) as
-      | { worktree: string; vcs: string | null }
+    const projectRow = pSqlite.prepare("SELECT worktree, vcs, name FROM project WHERE id = ?").get(pid) as
+      | { worktree: string; vcs: string | null; name: string | null }
       | undefined
     if (!projectRow) return
 
@@ -561,14 +558,23 @@ export namespace Database {
 
     if (!directories.includes(worktree)) directories.push(worktree)
 
-    const insert = pSqlite.prepare(
-      "INSERT OR IGNORE INTO directory_meta (directory, worktree, name, icon_url, icon_color, icon_override, activity_at, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    const upsert = pSqlite.prepare(
+      `INSERT INTO directory_meta (directory, worktree, name, icon_url, icon_color, icon_override, activity_at, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(directory) DO UPDATE SET
+         name = CASE WHEN excluded.name IS NOT NULL AND excluded.name != ? THEN excluded.name ELSE directory_meta.name END,
+         icon_url = CASE WHEN excluded.icon_url IS NOT NULL THEN excluded.icon_url ELSE directory_meta.icon_url END,
+         icon_color = CASE WHEN excluded.icon_color IS NOT NULL THEN excluded.icon_color ELSE directory_meta.icon_color END,
+         icon_override = CASE WHEN excluded.icon_override IS NOT NULL THEN excluded.icon_override ELSE directory_meta.icon_override END,
+         activity_at = CASE WHEN excluded.activity_at > directory_meta.activity_at THEN excluded.activity_at ELSE directory_meta.activity_at END,
+         time_updated = excluded.time_updated`,
     )
+
+    const projName = projectRow.name ?? ""
 
     for (const dir of directories) {
       const dirNorm = norm(dir)
       const recentRow = recentLookup.get(dirNorm)
-      insert.run(
+      upsert.run(
         dir,
         worktree,
         recentRow?.name ?? null,
@@ -578,6 +584,7 @@ export namespace Database {
         recentRow?.activity_at ?? Date.now(),
         Date.now(),
         Date.now(),
+        projName,
       )
     }
   }
@@ -608,7 +615,10 @@ export namespace Database {
     const insertRecent = sqlite.prepare(
       `INSERT INTO project_recent (key, kind, project_id, directory, name, icon_url, icon_color, icon_override, activity_at, time_created, time_updated)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET project_id = excluded.project_id, name = excluded.name, icon_url = excluded.icon_url, icon_color = excluded.icon_color, icon_override = excluded.icon_override, activity_at = excluded.activity_at, time_updated = excluded.time_updated`,
+       ON CONFLICT(key) DO UPDATE SET
+         project_id = CASE WHEN excluded.project_id IS NOT NULL THEN excluded.project_id ELSE project_recent.project_id END,
+         activity_at = CASE WHEN excluded.activity_at > project_recent.activity_at THEN excluded.activity_at ELSE project_recent.activity_at END,
+         time_updated = excluded.time_updated`,
     )
 
     for (const row of metaRows) {
@@ -639,9 +649,17 @@ export namespace Database {
     const recentRows = sqlite.prepare("SELECT * FROM project_recent").all() as any[]
     for (const row of recentRows) {
       const dirNorm = norm(row.directory ?? "")
-      recentLookup.set(dirNorm, row)
+      const prev = recentLookup.get(dirNorm)
+      if (!prev || (row.name && !prev.name) || (row.icon_color && !prev.icon_color)) {
+        recentLookup.set(dirNorm, row)
+      }
       const keyNorm = row.key?.replace(/^dir:/, "").toLowerCase()
-      if (keyNorm && keyNorm !== dirNorm) recentLookup.set(keyNorm, row)
+      if (keyNorm && keyNorm !== dirNorm) {
+        const prev2 = recentLookup.get(keyNorm)
+        if (!prev2 || (row.name && !prev2.name) || (row.icon_color && !prev2.icon_color)) {
+          recentLookup.set(keyNorm, row)
+        }
+      }
     }
 
     const chDir = channelDir()

@@ -548,27 +548,17 @@ export namespace SplitMigration {
 
       const resolveProject = (s: any) => {
         const row = projectByOld.get(s.project_id)
-        // For sessions with a real project_id, use the project's worktree to
-        // find the git root — all sessions under the same project should share
-        // one DB regardless of which worktree/subdirectory they were created in.
-        // For "global" sessions, use the session's own directory.
-        const dir =
-          s.project_id !== "global" && row?.worktree && row.worktree !== "/"
-            ? row.worktree
-            : s.directory || row?.worktree || "/"
+        // Always resolve from the session's own directory so ProjectIdentity
+        // walks up to find the real git root. Using the project's worktree
+        // was incorrect — it could be a subdirectory whose git root differs
+        // from other sessions in the same project.
+        const dir = s.directory || row?.worktree || "/"
         const info = ProjectIdentity.resolve(dir)
         const pid = info.id
         if (s.project_id !== "global") oldProjectIdMap.set(s.project_id, pid)
         mergeProject(pid, info, row)
         alias(s.directory, pid)
         return pid
-      }
-
-      for (const p of projectByOld.values()) {
-        const dir = p.worktree && p.worktree !== "/" ? p.worktree : p.id
-        const info = ProjectIdentity.resolve(dir)
-        oldProjectIdMap.set(p.id, info.id)
-        mergeProject(info.id, info, p)
       }
 
       for (const s of sessions) {
