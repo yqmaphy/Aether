@@ -123,11 +123,7 @@ beforeAll(async () => {
   }))
 
   mock.module("@/context/layout", () => ({
-    useLayout: () => ({
-      handoff: {
-        setTabs: () => undefined,
-      },
-    }),
+    useLayout: () => ({}),
   }))
 
   mock.module("@/context/sdk", () => ({
